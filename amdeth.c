@@ -9,10 +9,13 @@
 #include <rtems.h>
 #include <bsp/pci.h>
 #include <libcpu/io.h>
+/* let bsp.h fix the _ISA_MEM_BASE & friends symbols */
+#warning "TODO fix _ISA_MEM_BASE hack"
+#include <bsp.h>
 #include "bspExt.h"
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + _ISA_MEM_BASE)
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
-#define pciFindDevice bspExtPciFindDevice
+#define pciFindDevice BSP_pciFindDevice
 #define pciConfigInLong pci_read_config_dword
 #define pciConfigInByte pci_read_config_byte
 
