@@ -107,7 +107,7 @@ static rtems_name sname=rtems_build_name('S',' ','0','0');
 	me = sname++;
 	rtems_interrupt_enable(flags);
 
-	return RTEMS_SUCCESSFULE != rtems_semaphore_create(
+	return RTEMS_SUCCESSFUL != rtems_semaphore_create(
 			me,
 			init_count,
 			(binary ? RTEMS_BINARY_SEMAPHORE | RTEMS_INHERIT_PRIORITY | RTEMS_PRIORITY : RTEMS_COUNTING_SEMAPHORE)
