@@ -38,6 +38,10 @@ amdEthInit(AmdEthDev *d, int instance, int flags);
 int
 amdEthCloseDev(AmdEthDev d);
 
+/* obtain the size of the (opaque) snap header */
+int
+amdEthGetHeaderSize();
+
 /* initialize an ethernet/snap header
  *  - if dst!= 0, fill in the destination address
  *  - if d!= 0, fill in the source address using d's
@@ -50,9 +54,9 @@ amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d);
  * (NULL), use the default broadcast header.
  */
 
-/* broadcast a packet */
+/* send a packet */
 int
-amdEthSendPacket(AmdEthDev d, EtherHeader h, void *payload, int size);
+amdEthSendPacket(AmdEthDev d, EtherHeader header, void *payload, int size);
 	
 #define amdEthBroadcast(dev, payload, size) amdEthSendPacket((dev),0,(payload),(size))
 

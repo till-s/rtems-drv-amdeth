@@ -42,6 +42,7 @@ typedef unsigned char pci_ubyte;
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
 #define pciFindDevice BSP_pciFindDevice
 #define pciConfigOutLong pci_write_config_dword
+#define pciConfigOutByte pci_write_config_byte
 #define pciConfigInLong pci_read_config_dword
 #define pciConfigInByte pci_read_config_byte
 
@@ -313,7 +314,7 @@ typedef struct AmdEthDevRec_ {
 	int			irqLine;
 	RxBufDescU	rdesc[1];	/* one descriptor */
 	TxBufDescU	tdesc[2];	/* two descriptors; one for the header, one for the data */
-	EtherHeaderRec	header;
+	EtherHeaderRec	theader;
 	PSemaId		sync;
 	int			flags;
 	struct		{
@@ -731,6 +732,7 @@ int						rval;
 
 	/* setup the RX descriptor */
 	wrle(LOCAL2PCI(buf),&d->rdesc[0].STYLE.rbadrLE);
+
 	/* make sure buffer address is written
 	 * before yielding the descriptor
 	 */
@@ -804,6 +806,12 @@ AmdEthDev	d;
 	tmp|=PCI_COMMAND_MASTER;
 	pciConfigOutLong(bus,dev,fun,PCI_COMMAND,tmp);
 
+	/* program the PCI latency timer - we're not nice
+	 * but hang on to the bus as long as possible
+	 * for sake of determinism
+	 */
+	pciConfigOutByte(bus,dev,fun,PCI_LATENCY_TIMER,0xff);
+
 	/* switch to 32bit io */
 	d->baseAddr->rdp = 0x0; /* 0 is endian-safe :-) */
 	__asm__ __volatile__("eieio");
@@ -870,9 +878,9 @@ AmdEthDev	d;
 	{
 		/* fill the ethernet header */
 		/* send to broadcast */
-		amdEthHeaderInit(&d->header, 0, d);
+		amdEthHeaderInit(&d->theader, 0, d);
 		/* broadcast address */
-		memset(d->header.dst, 0xff, sizeof(d->header.dst));
+		memset(d->theader.dst, 0xff, sizeof(d->theader.dst));
 		/* clear ownership flags */
 		for (i=0; i<NumberOf(d->tdesc); i++)
 			wrle(0, &d->tdesc[i].STYLE.csr1LE);
@@ -1010,6 +1018,7 @@ int
 amdEthSendPacket(AmdEthDev d, EtherHeader h, void *data, int size)
 {
 register unsigned long csr1OR;
+int l = sizeof(*h);
 	if (!d) d=&devices[0];
 
 	csr1OR=rdle(&d->tdesc[0].STYLE.csr1LE) | rdle(&d->tdesc[1].STYLE.csr1LE);
@@ -1023,9 +1032,11 @@ register unsigned long csr1OR;
 	/* do statistics */
 	d->stats.txPackets++;
 
-	if (!h)
-		h=&d->header;
-	h->len = htons(sizeof(*h) - 14  + size);
+	if (!h) {
+		h=&d->theader;
+		l=sizeof(d->theader);
+	}
+	((EtherHeader)h)->len = htons(l - 14  + size);
 	/* clear csr2 */
 	wrle(0,
 		&d->tdesc[0].STYLE.csr2LE);
@@ -1043,7 +1054,7 @@ register unsigned long csr1OR;
 	/* make sure descriptors are written _before_ yielding the first one */
 	__asm__ __volatile__("eieio");
 	/* yield 1st descriptor */
-	wrle((-sizeof(*h) & TXDESC_CSR1_BCNT_MSK) |
+	wrle((-l & TXDESC_CSR1_BCNT_MSK) |
 		TXDESC_CSR1_OWN | TXDESC_CSR1_STP | TXDESC_CSR1_ONES,
 		&d->tdesc[0].STYLE.csr1LE);
 	__asm__ __volatile__("eieio");
@@ -1122,30 +1133,44 @@ int	inc;
 unsigned long
 lance_read_csr(int offset,AmdEthDev d)
 {
+unsigned long v, flags;
 if ( !d ) d = &devices[0];
-	return ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->rdp);
-
+	rtems_interrupt_disable(flags);
+	v = ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->rdp);
+	rtems_interrupt_enable(flags);
+	return v;
 }
 
 void
 lance_write_csr(unsigned long val, int offset, AmdEthDev d)
 {
+unsigned long flags;
 if ( !d ) d = &devices[0];
+	rtems_interrupt_disable(flags);
 	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->rdp);
+	rtems_interrupt_enable(flags);
 }
 
 unsigned long
 lance_read_bcr(int offset, AmdEthDev d)
 {
+unsigned long v, flags;
 if ( !d ) d = &devices[0];
-	return ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->bdp);
+	rtems_interrupt_disable(flags);
+	v = ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->bdp);
+	rtems_interrupt_enable(flags);
+	return v;
 
 }
+
 void
 lance_write_bcr(unsigned long val, int offset, AmdEthDev d)
 {
+unsigned long flags;
 if ( !d ) d = &devices[0];
+	rtems_interrupt_disable(flags);
 	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->bdp);
+	rtems_interrupt_enable(flags);
 }
 
 /* how to read a two-word counter without disabling interrupts
@@ -1300,4 +1325,10 @@ AmdEthDev	d;
 	/* hack; allow released tasks to finish */
 	sleep(1);
 	return 0;
+}
+
+int
+amdEthGetHeaderSize()
+{
+	return sizeof(EtherHeaderRec);
 }
