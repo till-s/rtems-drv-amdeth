@@ -25,6 +25,20 @@
 #error "Unknown Architecture"
 #endif
 
+#ifdef CPU_BIG_ENDIAN
+#ifdef __PPC
+static inline void wrle(unsigned long w, void *addr)
+{
+	__asm__ __volatile__("stwbrx %0, 0, %1"::"r"(w),"r"(addr));
+}
+static inline unsigned long rdle(unsigned long *addr)
+{
+	__asm__ __volatile__("lwbrx %0, 0, %0":"=r"(addr):"0"(addr));
+	return (unsigned long)addr;
+}
+#endif
+#endif
+
 #ifndef PCI_VENDOR_ID_AMD
 #define PCI_VENDOR_ID_AMD 0x1022
 #endif
@@ -32,7 +46,20 @@
 #define PCI_DEVICE_ID_AMD_LANCE 0x2000
 #endif
 
+#define STYLEFLAGS	BCR20_SWSTYLE_3
+#define STYLE		style3
+
+#undef RXTEST
+
 /* register bit definitions */
+#define BCR19_PVALID	(1<<15) /* status: EEPROM (detected and contents) valid */
+#define BCR19_PREAD	(1<<14)	/* EEPROM read command bit */
+#define BCR19_EEDET	(1<<13)	/* EEPROM detect */
+#define BCR19_EEN	(1<<4)	/* EEPROM port enable */
+#define BCR19_ECS	(1<<2)	/* EEPROM chip select */
+#define BCR19_ESK	(1<<1)	/* EEPROM serial clock */
+#define BCR19_EDIO	(1<<0)	/* EEPROM data in/out */
+
 #define BCR20_SWSTYLE_3	0x0003
 
 #define CSR0_ERR	(1<<15)	/* status: cerr | miss | merr */
@@ -57,6 +84,7 @@
 #define CSR3_RINTM	(1<<10)	/* mask rx irq */
 #define CSR3_TINTM	(1<<9)	/* mask tx irq */
 #define CSR3_IDONM	(1<<8)	/* mask init done irq */
+#define CSR3_IRQ_MSK	(CSR3_MISSM | CSR3_MERRM | CSR3_RINTM | CSR3_TINTM | CSR3_IDONM)
 #define CSR3_DXSUFLO	(1<<6)	/* disable xmit stop on underflow error */
 #define CSR3_LAPPEN	(1<<5)	/* enable look ahead packet procesing */
 #define CSR3_DXMT2PD	(1<<4)	/* disable xmit two part deferral */
@@ -74,6 +102,7 @@
 #define CSR4_RCVCCOM	(1<<4)	/* mask rx collision cnt ovfl irq */
 #define CSR4_TXSTRT	(1<<3)	/* status: xmission started */
 #define CSR4_TXSTRTM	(1<<2)	/* mask TXSTRT irq */
+#define CSR4_IRQ_MSK	(CSR4_MFCOM | CSR4_RCVCCOM | CSR4_TXSTRTM)
 
 #define CSR5_TOKINTD	(1<<15)	/* disable xmit ok irq */
 #define CSR5_LTINTEN	(1<<14)	/* enable last xmit irq */
@@ -128,6 +157,7 @@
 #define CSR80_XMTFW_64	(1<<8)	/* tx fifo watermark (for DMA request) = 64 */
 #define CSR80_XMTFW_108	(2<<8)	/* tx fifo watermark (for DMA request) = 108 */
 
+
 typedef struct LanceRegs32Rec_ {
 	volatile unsigned char aprom[16];
 	volatile unsigned long rdp;
@@ -136,14 +166,16 @@ typedef struct LanceRegs32Rec_ {
 	volatile unsigned long bdp;
 } LanceRegs32Rec, *LanceRegs32;
 
+
 /* RX buffer descriptor
  * Note that the Am79C973 uses this area LITTLE ENDIAN
  * and that it's different, depending on the software
  * style used!
+ * The descriptor ring must be 16byte aligned! 
  */
 typedef union RxBufDescU_ {
 	struct {
-		unsigned long	rbadrLE;/* buffer address */
+		unsigned long	rbadrLE __attribute__ ((aligned(16)));/* buffer address */
 		unsigned long	mcntLE;	/* message count and frame tag */
 		unsigned long	statLE; /* status bits */
 		unsigned long	user;	/* user space */
@@ -174,14 +206,17 @@ typedef union RxBufDescU_ {
 #define RXDESC_STAT_ONES	(15<<12)	/* host MUST write/set these */
 #define RXDESC_STAT_BCNT_MSK	((1<<12)-1)	/* 2s COMPLEMENT of buffer length */
 
+#define NumberOf(arr) (sizeof(arr)/sizeof(arr[0]))
+
 /* TX buffer descriptor
  * Note that the Am79C973 uses this area LITTLE ENDIAN
  * and that it's different, depending on the software
  * style used!
+ * The descriptor ring must be 16byte aligned! 
  */
 typedef union TxBufDescU_ {
 	struct {
-		unsigned long	tbadrLE;/* buffer address */
+		unsigned long	tbadrLE __attribute__ ((aligned(16)));/* buffer address */
 		unsigned long	csr1LE;	/* status and byte count */
 		unsigned long	csr2LE;	/* status bits */
 		unsigned long	user;	/* user space */
@@ -216,13 +251,37 @@ typedef union TxBufDescU_ {
 #define TXDESC_CSR2_RTRY	(1<<26)		/* retry error (more than 16 attempts) */
 #define TXDESC_CSR2_TRC_MSK	(15)		/* mask for the retry count */
 
+typedef struct EtherHeaderRec_ {
+	unsigned char	dst[6];
+	unsigned char	src[2];
+	unsigned short	len;	/* network byte order */
+	struct	{
+		unsigned char dsap;
+		unsigned char ssap;
+		unsigned char ctrl;
+	} llc8022;
+	struct  {
+		unsigned char org[3];
+		unsigned short type;
+	} snap;
+} EtherHeaderRec, *EtherHeader;
 
-typedef struct AmdEthDriverRec_ {
+/* TODO add mutex for driver access */
+typedef struct AmdEthDevRec_ {
 	LanceRegs32	baseAddr;
 	int		irqLine;
-} AmdEthDriverRec;
+	RxBufDescU	rdesc[1];	/* one dummy descriptor */
+	TxBufDescU	tdesc[2];	/* two descriptors; one for the header, one for the data */
+	EtherHeaderRec	header;
+	struct		{
+	}		stats;
+} AmdEthDevRec;
 
-static AmdEthDriverRec driver={0};
+static AmdEthDevRec defDev={0};
+
+#ifdef RXTEST
+static unsigned char rxbuffer[NumberOf(defDev.rdesc)][2048];
+#endif
 
 /* read and write a data / bus registers in the lance.  */
 /* NOTE: registers should be mapped to guarded memory. Hence, 
@@ -237,18 +296,19 @@ static AmdEthDriverRec driver={0};
 
 static char *dn="Amd Ethernet:";
 
+
 int
-amdEthInit(AmdEthDriver *pd, int instance)
+amdEthInit(AmdEthDev *pd, int instance)
 {
 int		bus,dev,fun,i;
 pci_ulong	tmp;
 pci_ubyte	tmpb;
-AmdEthDriver	d;
+AmdEthDev	d;
 
 
 	/* for now, allow only one instance */
-	assert(instance==1 && !driver.baseAddr);
-	d=&driver;
+	assert(instance==1 && !defDev.baseAddr);
+	d=&defDev;
 
 	/* scan PCI bus */
 	if (pciFindDevice(
@@ -257,13 +317,13 @@ AmdEthDriver	d;
 			instance,
 			&bus, &dev, &fun)) {
 		fprintf(stderr,"%s unable to find an AMD Lance chip\n",dn);
-		return -1;
+		return AMDETH_ERROR;
 	}
 
 	pciConfigInLong(bus,dev,fun,PCI_BASE_ADDRESS_1, &tmp);
 	if (tmp & 1 || !tmp) {
 		fprintf(stderr,"%s base address not in memory space",dn);
-		return -1;
+		return AMDETH_ERROR;
 	}
 	d->baseAddr = (LanceRegs32)PCI2LOCAL(tmp);
 	pciConfigInByte(bus,dev,fun,PCI_INTERRUPT_LINE,&tmpb);
@@ -285,39 +345,141 @@ AmdEthDriver	d;
 	{
 		register unsigned long rap = (unsigned long)&d->baseAddr->rap;
 		register unsigned long bdp = (unsigned long)&d->baseAddr->bdp;
+		register unsigned long rdp = (unsigned long)&d->baseAddr->rdp;
 #define WBCR(idx, val) WriteIndReg(val,idx,rap,bdp)
-		WBCR(20, BCR20_SWSTYLE_3);
-#undef WBCR
+#define WCSR(idx, val) WriteIndReg(val,idx,rap,rdp)
+		WBCR(20, STYLEFLAGS);
+
+		/* we really assume that there is an eeprom present providing some
+		 * initialization
+	 	 */
+		{ register unsigned long lanceBCR19;
+		ReadIndReg(lanceBCR19, 19, rap, bdp);
+		assert( lanceBCR19 & BCR19_PVALID );
+		}
+
+		/* mask all possible irq sources */
+		WCSR(3,  CSR3_IRQ_MSK);
+
+		/* transmit on demand only */
+		WCSR(4,  CSR4_IRQ_MSK | CSR4_TXDPOLL);
+		WCSR(5,  CSR5_TOKINTD);
+		/* switch off receiver */
+#ifndef RXTEST
+		WCSR(7,  CSR7_RXDPOLL);
+		WCSR(15, CSR15_DRX);
+#endif
+
+		/* clear logical address filters */
+		WCSR(8, 0);
+		WCSR(9, 0);
+		WCSR(10, 0);
+		WCSR(11, 0);
+		/* physical address is read from EEPROM */
+		/* receiver ring */
+		 WCSR(24, ((LOCAL2PCI(d->rdesc) &0xffff)));
+		 WCSR(25, ((LOCAL2PCI(d->rdesc) >> 16)&0xffff));
+		 WCSR(76, ((-(long)NumberOf(d->rdesc)) & 0xffff)); /* RX ring length */
+		 WCSR(49, 0); /* default RX polling interval */
+		/* transmitter ring */
+		 WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
+		 WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
+		 WCSR(78, ((-(long)NumberOf(d->tdesc)) & 0xffff)); /* TX ring length */
+		 WCSR(47, 0); /* default TX polling interval */
+
+	/* initialize the buffer descriptors */
+	{
+		int i;
+		/* fill the ethernet header */
+		/* send to broadcast */
+		memset(d->header.dst, 0xff, sizeof(d->header.dst));
+		memcpy(d->header.src, (void*)d->baseAddr->aprom, sizeof(d->header.src));
+		d->header.llc8022.dsap = 0xAA;
+		d->header.llc8022.ssap = 0xAA;
+		d->header.llc8022.ctrl = 0x3;
+		d->header.snap.org[2]  = 0xca;
+		d->header.snap.type    = htons(0x805b); /* stanford */
+		wrle(LOCAL2PCI(&d->header),&d->tdesc[0].STYLE.tbadrLE);
+		/* clear ownership flags */
+		for (i=0; i<NumberOf(d->tdesc); i++)
+			wrle(0, &d->tdesc[i].STYLE.csr1LE);
+#ifdef RXTEST
+		memset(rxbuffer,0,sizeof(rxbuffer));
+		for (i=0; i<NumberOf(d->rdesc); i++) {
+			wrle(LOCAL2PCI(rxbuffer[i]),&d->rdesc[0].STYLE.rbadrLE);
+			wrle(RXDESC_STAT_OWN |
+			     RXDESC_STAT_ONES |
+			     (-sizeof(rxbuffer[0]) & RXDESC_STAT_BCNT_MSK),
+			     &d->rdesc[i].STYLE.statLE);
+		}
+#endif
 	}
 
+		/* start the device */
+		WCSR(0, CSR0_STRT);
+	}
+#undef WBCR
+#undef WCSR
 	if (pd) *pd=d;
 
-	return 0;
+	return AMDETH_OK;
+}
+
+int
+amdEthBroadcast(AmdEthDev d,void *data, int size)
+{
+	if (!d) d=&defDev;
+
+	if ( rdle(&d->tdesc[0].STYLE.csr1LE) & TXDESC_CSR1_OWN ||
+	     rdle(&d->tdesc[1].STYLE.csr1LE) & TXDESC_CSR1_OWN)
+		return AMDETH_BUSY;
+	/* TODO do statistics */
+	d->header.len          = sizeof(d->header) - 14  + size;
+	/* clear csr2 */
+	wrle(0,
+		&d->tdesc[0].STYLE.csr2LE);
+	wrle(0,
+		&d->tdesc[1].STYLE.csr2LE);
+	/* set buffer address of second bd */
+	wrle(LOCAL2PCI(data), &d->tdesc[1].STYLE.tbadrLE);
+	/* setup csr1 of second bd */
+	/* NOTE: 2's complement of byte count! */
+	wrle((-size & TXDESC_CSR1_BCNT_MSK) |
+		TXDESC_CSR1_OWN | TXDESC_CSR1_ENP | TXDESC_CSR1_ONES,
+		&d->tdesc[1].STYLE.csr1LE);
+	/* yield 1st descriptor */
+	wrle((-sizeof(d->header) & TXDESC_CSR1_BCNT_MSK) |
+		TXDESC_CSR1_OWN | TXDESC_CSR1_STP | TXDESC_CSR1_ONES,
+		&d->tdesc[0].STYLE.csr1LE);
+	__asm__ __volatile__("eieio");
+	/* demand transmission */
+	WriteIndReg( CSR0_TDMD, 0, &d->baseAddr->rap, &d->baseAddr->rdp);
+	return AMDETH_OK;
 }
 
 /* routines for debugging / testing */
 unsigned long
 lance_read_csr(int offset)
 {
-	ReadIndReg(offset,offset,&driver.baseAddr->rap,&driver.baseAddr->rdp);
+	ReadIndReg(offset,offset,&defDev.baseAddr->rap,&defDev.baseAddr->rdp);
 	return offset;
 
 }
 void
 lance_write_csr(unsigned long val, int offset)
 {
-	WriteIndReg(val,offset,&driver.baseAddr->rap,&driver.baseAddr->rdp);
+	WriteIndReg(val,offset,&defDev.baseAddr->rap,&defDev.baseAddr->rdp);
 }
 
 unsigned long
 lance_read_bcr(int offset)
 {
-	ReadIndReg(offset,offset,&driver.baseAddr->rap,&driver.baseAddr->bdp);
+	ReadIndReg(offset,offset,&defDev.baseAddr->rap,&defDev.baseAddr->bdp);
 	return offset;
 
 }
 void
 lance_write_bcr(unsigned long val, int offset)
 {
-	WriteIndReg(val,offset,&driver.baseAddr->rap,&driver.baseAddr->bdp);
+	WriteIndReg(val,offset,&defDev.baseAddr->rap,&defDev.baseAddr->bdp);
 }

@@ -21,11 +21,25 @@ typedef unsigned char pci_ubyte;
 #error "Unknown Architecture"
 #endif
 
-typedef struct AmdEthDriverRec_ *AmdEthDriver;
+/* use the default device */
+#define AMDETH_DEFAULT_DEVICE	0
 
-/* allocate and initialize a driver structure */
+typedef struct AmdEthDevRec_ *AmdEthDev;
+
+/* error codes */
+#define AMDETH_OK		0
+#define AMDETH_ERROR		(-1)
+#define AMDETH_BUSY		(-2)
+
+/* allocate and initialize a device structure
+ * which is returned in d.
+ */
 int
-amdEthInit(AmdEthDriver *d, int instance);
+amdEthInit(AmdEthDev *d, int instance);
+
+/* broadcast a packet */
+int
+amdEthBroadcast(AmdEthDev d, void *packet, int size);
 
 #endif
 
