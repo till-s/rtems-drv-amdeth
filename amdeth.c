@@ -858,7 +858,7 @@ AmdEthDev	d;
 		WCSR(76, ((-(long)NumberOf(d->rdesc)) & 0xffff)); /* RX ring length */
 		WCSR(49, 0); /* default RX polling interval */
 		/* transmitter ring */
-		printf("TSILL tdesc is at 0x%08x (PCI 0x%08x)\n",d->tdesc,LOCAL2PCI(d->tdesc));
+		printf("TSILL tdesc is at %8p (PCI 0x%08x)\n",d->tdesc,LOCAL2PCI(d->tdesc));
 		WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
 		WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
 		WCSR(78, ((-(long)NumberOf(d->tdesc)) & 0xffff)); /* TX ring length */
