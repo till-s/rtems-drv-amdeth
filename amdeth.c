@@ -26,6 +26,7 @@
 
 #define NUM_ETH_DEVICES 4	/* how many devices our table supports */
 #define RT_DRIVER			/* whether to set some flags for real-time specific application */
+#define AUTOPOLL_BROKEN		/* I can't get media autopolling to work :-( */
 
 #ifdef __rtems__
 #include <rtems.h>
@@ -59,7 +60,7 @@ typedef unsigned char pci_ubyte;
 
 #ifdef CPU_BIG_ENDIAN
 #if defined(__PPC) || defined(__PPC__)
-static inline void wrle(unsigned long w, void *addr)
+static inline void wrle(unsigned long w, volatile void *addr)
 {
 	__asm__ __volatile__("stwbrx %0, 0, %1"::"r"(w),"r"(addr));
 }
@@ -118,10 +119,26 @@ static inline unsigned long rdle(unsigned long *addr)
 #define BCR20_SWSTYLE_3		0x0003
 
 #define BCR25_SRAMSIZE		(0xff)
+
 #define BCR27_LOLATRX		(1<<14)	/* low latency RX function; requires 
 									 * SRAM > 0
 									 * CSR127(RPA) = 1
 									 */
+
+#define BCR32_APEP			(1<<11) /* PHY auto-poll enable */
+
+#define BCR32_APDW_MSK		(7<<8)  /* auto-poll dwell time (polling interval) */
+#define BCR32_APDW_16us		(0<<8)
+#define BCR32_APDW_103us	(1<<8)
+#define BCR32_APDW_206us	(2<<8)
+#define BCR32_APDW_410us	(3<<8)
+#define BCR32_APDW_819us	(4<<8)
+#define BCR32_APDW_1640us	(5<<8)
+
+#define ANR24_LINK_UP		(1<<3)
+#define ANR24_FULLDUP		(1<<2)
+#define ANR24_ANEG_ALRT		(1<<1)
+#define ANR24_SPEED_100		(1<<0)
 
 #define CSR0_ERR			(1<<15)	/* status: cerr | miss | merr */
 #define CSR0_CERR			(1<<13)	/* status: collision error */
@@ -348,6 +365,7 @@ typedef struct AmdEthDevRec_ {
 	EtherHeaderRec	theader;
 	PSemaId		sync;
 	int			flags;
+	unsigned	rmode, tmode;
 	struct		{
 		unsigned long	txPackets;	/* # packets sent */
 		unsigned long	rxPackets;	/* # packets received */
@@ -370,6 +388,8 @@ typedef struct AmdEthDevRec_ {
 		unsigned long	rxOverrunHi;
 		unsigned long	rxCollisionHi;
 		unsigned long	sysError;
+		unsigned long	miiIrqs;
+		unsigned long	linkStat;
 	}		stats;
 } AmdEthDevRec;
 
@@ -399,8 +419,12 @@ unsigned long roundtrip;
 #define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_TINTM | CSR3_RINTM)) | CSR3_DXSUFLO)
 #define CSR4_SETUP	((CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) | CSR4_RTFLAGS)
 #define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE)
+#ifndef AUTOPOLL_BROKEN
+#define CSR7_SETUP	(CSR7_RTFLAGS | CSR7_MAPINTE)
+#else
 #define CSR7_SETUP	(CSR7_RTFLAGS)
-#define CSR15_SETUP	(CSR15_RTFLAGS)
+#endif
+#define CSR15_SETUP	(CSR15_RTFLAGS | CSR15_PORTSEL)
 
 #ifndef HAVE_LIBBSPEXT
 static int  amdEthIntIsOn();
@@ -484,10 +508,19 @@ ReadIndReg(
 /* when using these macros, the 'rap', 'rdp' and 'bdp' variables
  * must be set up appropriately.
  */
+
+#define RAPDECL register volatile unsigned long *rap = &d->baseAddr->rap
+#define RDPDECL register volatile unsigned long *rdp = &d->baseAddr->rdp
+#define BDPDECL register volatile unsigned long *bdp = &d->baseAddr->bdp
+
 #define WBCR(idx, val) WriteIndReg(val,idx,rap,bdp)
+#define WBCR1(val) wrle(val,bdp) /* write, using old rap */
 #define RBCR(idx) ReadIndReg(idx,rap,bdp)
 #define WCSR(idx, val) WriteIndReg(val,idx,rap,rdp)
+#define WCSR1(val) wrle(val,rdp) /* write, using old rap */
 #define RCSR(idx) ReadIndReg(idx,rap,rdp)
+
+#define GET_LINK_STAT() (WBCR(33, ((0x1e<<5)|24)),RBCR(34))
 
 static char *dn="Amd Ethernet:";
 
@@ -566,35 +599,49 @@ updateRxStats(AmdEthDev d, unsigned long rxstat)
 	return 0;
 }
 
-static inline void
-yieldRx(AmdEthDev d, unsigned long rxstat)
+/*static inline*/ void
+yieldRx( AmdEthDev d, unsigned long rxstat )
 {
+RAPDECL;
+RDPDECL;
 	wrle(rxstat | RXDESC_STAT_OWN, &d->rdesc[0].STYLE.statLE);
 	/* yield the descriptor before enforcing a poll */
 	__asm__ __volatile__("eieio");
-	WriteIndReg(CSR7_SETUP|CSR7_RDMD, 7, &d->baseAddr->rap, &d->baseAddr->rdp);
+	WCSR1( (RCSR(7) & ~CSR7_IRQ_STAT) | CSR7_RDMD );
 }
 
+#ifdef __PPC__
+#define ISR_PROF_DEPTH	10
+unsigned long amdEthMaxIsrTicks = 0;
+unsigned long amdEthIsrProfile[ISR_PROF_DEPTH]={};
+#define ISR_PROF_INC()	asm volatile("mftb %0":"=r"(isrProf[i++]))
+#endif
 
 static void
-amdEthIsr(AmdEthDev	d)
+amdEthInterruptWork(AmdEthDev d)
 {
-register volatile unsigned long *rap, *rdp;
-register unsigned long	csr0, csr5, csr4;
+register unsigned long	csr0, csr5, tmp;
 unsigned long			savedAR;
 int						bogusIrq = 1;
+#ifdef __PPC__
+unsigned long			i=0;
+unsigned long			isrProf[ISR_PROF_DEPTH];
+
+	ISR_PROF_INC();
+#endif
+
 
 #ifndef HAVE_LIBBSPEXT
 	for ( ; d; d=d->next )
 #endif
 	{
-
+	RAPDECL;
+	RDPDECL;
 		/* save the rap before changing it (don't care about endianness) */
-		savedAR = d->baseAddr->rap;
+		ISR_PROF_INC();
+		savedAR = *rap;
 
-		rap = &d->baseAddr->rap;
-		rdp = &d->baseAddr->rdp;
-
+		ISR_PROF_INC();
 		if ( ((csr0=RCSR(0)) & CSR0_INTR) ) {
 			/* to check: EXDINT, IDON, MERR, MISS, MFCO, RCVCCO, RINT,
 			 * done (lowercase - x: unused):
@@ -605,9 +652,10 @@ int						bogusIrq = 1;
 			 *           sint     x       x     x      x       x       x
 			 *           csr5  csr0    csr4  csr4   csr7   csr7   csr7 
 			 *           MIIPDTINT, MAPINT, MCCIINT, MPINT
-			 *                   x       x       x     x
+			 *                   x     map       x     x
 			 *                 csr7    csr7    csr7  csr5
 			 */
+			ISR_PROF_INC();
 			d->stats.irqs++;
 			bogusIrq = 0;
 #if 0
@@ -636,25 +684,36 @@ int						bogusIrq = 1;
 					unsigned long now;
 					__asm__ __volatile__("mftb %0":"=r"(now));
 					roundtrip = now-roundtrip;
-					if (AMDETH_FLG_AUTO_RX & d->flags) {
-						updateRxStats(d, dstat);
-						yieldRx(d,dstat);
-					} else {
-						pSemPost(&d->sync);
+
+					switch ( d->rmode ) {
+						default:
+						break;
+						case AMDETH_FLG_RX_MODE_AUTO:
+							/* probably cheaper to do this from ISR context
+							 * than posting a semaphore...
+							 */
+							updateRxStats(d, dstat);
+							yieldRx(d,dstat);
+						break;
+						case AMDETH_FLG_RX_MODE_SYNC:
+							pSemPost(&d->sync);
+						break;
 					}
 				}
 			}
+			ISR_PROF_INC();
 			/* clear raised flags */
 	 		WCSR(0,csr0);
 
 			/* handle user and the counter rollover interrupts */
-			csr4=RCSR(4);
-			if (csr4 & CSR4_MFCO)
+			tmp=RCSR(4);
+			if (tmp & CSR4_MFCO)
 				d->stats.rxOverrunHi++;
-			if (csr4 & CSR4_RCVCCO)
+			if (tmp & CSR4_RCVCCO)
 				d->stats.rxCollisionHi++;
 			/* clear raised flags */
-			WCSR(4,csr4);
+			WCSR(4,tmp);
+			ISR_PROF_INC();
 
 			csr5=RCSR(5);
 			if (csr5 & CSR5_SINT) {
@@ -663,40 +722,69 @@ int						bogusIrq = 1;
 				/* TODO we should do something here */
 			}
 
-			if (   (AMDETH_FLG_AUTO_TX_STATS & d->flags)
-			    && ((CSR0_TINT & csr0) || (CSR5_EXDINT & csr5)) ) {
+			if (   ((CSR0_TINT & csr0) || (CSR5_EXDINT & csr5))
+			    && (AMDETH_FLG_TX_MODE_AUTO == AMDETH_FLG_TX_MODE(d->flags)) ) {
 					amdEthUpdateTxStats(d,(unsigned)-1);
 			}
 			WCSR(5,csr5);
+			ISR_PROF_INC();
+
+#ifndef AUTOPOLL_BROKEN
+			tmp = RCSR(7);
+			if ( tmp & CSR7_MAPINT ) {
+				unsigned long	savedMIIAR;
+				BDPDECL;
+				d->stats.miiIrqs++;
+				savedMIIAR = RBCR(33);
+				/* get summary status */
+				d->stats.linkStat = GET_LINK_STAT();
+				WBCR(33, savedMIIAR);
+				/* clear raised flag */
+				WCSR(7, tmp);
+			}
+#endif
 		}
 
 		/* restore address register contents */
 		d->baseAddr->rap=savedAR;
-
 	}
 	amdEthBogusIrqs += bogusIrq;
+#ifdef __PPC__
+	/* do profiling */
+	ISR_PROF_INC();
+	tmp=isrProf[i-1] - isrProf[0];
+	if ( amdEthMaxIsrTicks < tmp ) {
+		amdEthMaxIsrTicks = tmp;
+		for ( tmp=0; tmp<i-1; tmp++ ) {
+			amdEthIsrProfile[tmp] = isrProf[tmp+1]-isrProf[tmp];
+		}
+		amdEthIsrProfile[tmp]=0xdeadbeef;
+	}
+#endif
+}
+
+static void
+amdEthIsr(AmdEthDev	d)
+{
+amdEthInterruptWork(d);
 }
 
 static inline void
 intDoEnable(AmdEthDev d)
 {
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
-	WCSR( 0, RCSR(0) | CSR0_IENA);
-	WCSR( 5, RCSR(5) | CSR5_SINTE);
+RAPDECL;
+RDPDECL;
+	WCSR1( (RCSR(0) &~CSR0_IRQ_STAT) | CSR0_IENA);
+	WCSR1( (RCSR(5) &~CSR5_IRQ_STAT) | CSR5_SINTE);
 }
 
 static inline void
 intDoDisable(AmdEthDev d)
 {
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
-	WCSR( 0, RCSR(0) & ~CSR0_IENA);
-	WCSR( 5, RCSR(0) & ~CSR5_SINTE);
+RAPDECL;
+RDPDECL;
+	WCSR1( (RCSR(0) &~CSR0_IRQ_STAT) & ~CSR0_IENA);
+	WCSR1( (RCSR(5) &~CSR5_IRQ_STAT) & ~CSR5_SINTE);
 }
 
 
@@ -706,13 +794,11 @@ amdEthIntIsOn(const rtems_irq_connect_data *arg)
 {
 int			i;
 AmdEthDev	d;
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
 	for (i = 0; i < NumberOf(insaneApiMap); i++) {
 		if ( (d = insaneApiMap[i].device) &&
 			  d->brokenbydesign.name == arg->name) {
-			rap = &d->baseAddr->rap;
-			rdp = &d->baseAddr->rdp;
+			RAPDECL;
+			RDPDECL;
 			return	(RCSR(0) & CSR0_IENA) || (RCSR(5) & CSR5_SINTE);
 		}
 	}
@@ -760,13 +846,14 @@ int
 amdEthReceivePacket(AmdEthDev d, char *buf, int len)
 {
 int						rval;
+unsigned long			mode;
 
-	if ( !(d->flags & AMDETH_FLG_USE_RX) )
+	if ( ! (mode=AMDETH_FLG_RX_MODE(d->flags)) )
 		return AMDETH_ERROR;
 
 	/* can't call this again if in AUTO_RX mode */
 	if ( (rdle(&d->rdesc[0].STYLE.statLE) & RXDESC_STAT_OWN) ||
-	     ((d->flags & AMDETH_FLG_AUTO_RX) && d->rdesc[0].STYLE.rbadrLE )  )
+	     ((AMDETH_FLG_RX_MODE_AUTO == mode) && d->rdesc[0].STYLE.rbadrLE )  )
 		return AMDETH_BUSY;
 
 	/* setup the RX descriptor */
@@ -777,22 +864,47 @@ int						rval;
 	 */
 	__asm__ __volatile__("eieio");
 
-	yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
 
-	if ( !(AMDETH_FLG_AUTO_RX & d->flags) ) {
-		/* block on an event */
-		if ( pSemWait(&d->sync) ) {
-			/* semaphore destroyed; device was closed */
-			return -1;
-		}
+	switch ( mode ) {
+		case AMDETH_FLG_RX_MODE_SYNC:
 
-		rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE));
-		/* get the real length */
-		return rval ? rval : ((int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
-	} else {
-		/* TODO activate RX auto polling ? */
-		return 0;
+			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+
+			/* block on an event */
+			if ( pSemWait(&d->sync) ) {
+				/* semaphore destroyed; device was closed */
+				return -1;
+			}
+
+			/* update stats and return length */
+			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE))) )
+				rval = ((int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
+			return rval;
+
+		case AMDETH_FLG_RX_MODE_POLL:
+
+			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE))) )
+				rval = ((int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
+
+			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+
+			return rval;
+
+		case AMDETH_FLG_RX_MODE_AUTO:
+			{
+			RAPDECL;
+			RDPDECL;
+			/* activate RX auto polling ? */
+			WCSR1(RCSR(7) & ~ (CSR7_RXDPOLL|CSR7_IRQ_STAT));
+			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+			}
+			return 0;
+
+		default:
+			break;
 	}
+	/* should never get here */
+	return AMDETH_ERROR;
 }
 
 int
@@ -813,6 +925,15 @@ AmdEthDev	d;
 	}
 
 	memset(d, 0, sizeof(*d));
+
+	if ( (d->tmode=AMDETH_FLG_TX_MODE(flags)) > AMDETH_FLG_TX_MODE_POLL ) {
+		fprintf(stderr,"Invalid TX mode\n");
+		return AMDETH_ERROR;
+	}
+	if ( (d->rmode=AMDETH_FLG_RX_MODE(flags)) > AMDETH_FLG_RX_MODE_SYNC ) {
+		fprintf(stderr,"Invalid RX mode\n");
+		return AMDETH_ERROR;
+	}
 
 	/* scan PCI bus */
 	if (pciFindDevice(
@@ -857,9 +978,9 @@ AmdEthDev	d;
 
 	/* initialize BCR regs */
 	{
-		register volatile unsigned long *rap = &d->baseAddr->rap;
-		register volatile unsigned long *bdp = &d->baseAddr->bdp;
-		register volatile unsigned long *rdp = &d->baseAddr->rdp;
+		RAPDECL;
+		RDPDECL;
+		BDPDECL;
 
 		WBCR(20, STYLEFLAGS);
 
@@ -872,31 +993,38 @@ AmdEthDev	d;
 		 * for some BCRs (e.g., BCR18 enabling PCI burst modes)...
 	 	 */
 		{ register unsigned long lanceBCR19;
-		lanceBCR19=ReadIndReg(19, rap, bdp);
+		lanceBCR19=RBCR(19);
 		assert( lanceBCR19 & BCR19_PVALID );
 		}
 
 #if 0 /* not yet ready - unsure if really needed */
 		/* set LOLATRX (requires SRAM > 0, CSR127(RPA) ) */
-		WBCR(27, RBCR(27) | BCR27_LOLATRX);
+		WBCR1(RBCR(27) | BCR27_LOLATRX);
 #endif
 
 		/* clear interrupt and mask unneeded sources */
 		WCSR(0,  CSR0_SETUP | CSR0_IRQ_STAT);
 
-		WCSR(3,  CSR3_SETUP);
+		WCSR(3,  CSR3_SETUP | (AMDETH_FLG_RX_MODE_POLL == d->rmode ? CSR3_RINTM : 0 ));
 
 		WCSR(4,  CSR4_SETUP | CSR4_IRQ_STAT);
 
 		WCSR(5,  CSR5_SETUP | CSR5_IRQ_STAT);
 
-		WCSR(7,  CSR7_SETUP | CSR7_IRQ_STAT);
+		WCSR(7, CSR7_SETUP | CSR7_IRQ_STAT);
 
 		/* switch off receiver ? */
-		WCSR(15, CSR15_SETUP
-					| (flags & AMDETH_FLG_USE_RX ? 0 : CSR15_DRX)
-					| (flags & AMDETH_FLG_NOBCST ? CSR15_DRCVBC : 0)
-			);
+		tmp = CSR15_SETUP;
+		if ( d->tmode == AMDETH_FLG_TX_MODE_OFF ) {
+			tmp |= CSR15_DTX;
+		}
+		if ( d->rmode == AMDETH_FLG_RX_MODE_OFF ) {
+			tmp |= CSR15_DRX;
+		}
+		if ( flags & AMDETH_FLG_NOBCST ) {
+			tmp |= CSR15_DRCVBC;
+		}
+		WCSR(15, tmp);
 
 		/* clear logical address filters */
 		WCSR(8, 0);
@@ -944,7 +1072,6 @@ AmdEthDev	d;
 #endif
 	}
 
-		WCSR(0, CSR0_SETUP | CSR0_STRT);
 		/* I don't know of a way how to detect if the card has
 		 * a fiber or copper interface. Unfortunately, some
  		 * settings need to be different and hence YOU tell ME
@@ -954,16 +1081,26 @@ AmdEthDev	d;
 			 * If I don't do this, the link still works but experiences
 			 * quite high bit errors (CRC errors)!
 			 */
-			WCSR(2, RCSR(2) | BCR2_DISSCR_SFEX);
+			WBCR1( RBCR(2) | BCR2_DISSCR_SFEX );
 		} else {
-			WCSR(2, RCSR(2) & ~BCR2_DISSCR_SFEX);
+			WBCR1( RBCR(2) & ~BCR2_DISSCR_SFEX );
 		}
+
+#ifndef AUTOPOLL_BROKEN
+		/* Enable MII auto polling */
+		WBCR1( RBCR(32) | BCR32_APEP );
+#endif
+		/* obtain initial link status */
+		d->stats.linkStat = GET_LINK_STAT();
+
+		/* finally, start the device */
+		WCSR(0, CSR0_SETUP | CSR0_STRT);
 	}
 
 	/* RTEMS binary semaphores allow nesting and are not
 	 *       suited for task synchronization
 	 */
-	if (AMDETH_FLG_USE_RX & flags) 
+	if ( AMDETH_FLG_RX_MODE_SYNC==d->rmode )
 		pSemCreate( 0/* binary */, 0 /* empty */, &d->sync);
 
 	/* install ISR */
@@ -1081,7 +1218,11 @@ amdEthSendPacket(AmdEthDev d, EtherHeader h, void *data, int size)
 {
 register unsigned long csr1OR;
 int l = sizeof(*h);
+
 	if (!d) d=&devices[0];
+
+	if ( ! d->tmode )
+		return AMDETH_ERROR;
 
 	csr1OR=rdle(&d->tdesc[0].STYLE.csr1LE) | rdle(&d->tdesc[1].STYLE.csr1LE);
 	if ( csr1OR & TXDESC_CSR1_OWN )
@@ -1121,16 +1262,16 @@ int l = sizeof(*h);
 		&d->tdesc[0].STYLE.csr1LE);
 	__asm__ __volatile__("eieio");
 	{
+	RAPDECL;
+	RDPDECL;
 	/* TSILL */
 	unsigned long flags;
 	/* demand transmission without changing status bits - we
 	 * hope nobody (ISR or other thread) modifies the IENA flag while we are
 	 * tampering with this register...
 	 */
-	register volatile unsigned long *rap = &d->baseAddr->rap;
-	register volatile unsigned long *rdp = &d->baseAddr->rdp;
 	rtems_interrupt_disable(flags);
-	WCSR(0, (RCSR(0) & ~(CSR0_IRQ_STAT)) | CSR0_TDMD);
+	WCSR1((RCSR(0) & ~(CSR0_IRQ_STAT)) | CSR0_TDMD);
 	__asm__ __volatile__("mftb %0":"=r"(roundtrip));
 	rtems_interrupt_enable(flags);
 	}
@@ -1184,6 +1325,12 @@ int	inc;
 		fprintf(f,"  missed frames:  %lli\n",   read_counter(d, 112, &d->stats.rxOverrunHi));
 		fprintf(f,"  collision Hi:   %lli\n",   read_counter(d, 114, &d->stats.rxCollisionHi));
 		fprintf(f,"  system err.:    %li\n",    d->stats.sysError);
+		fprintf(f,"PHY status:\n");
+		fprintf(f,"  interrupts:     %li\n",    d->stats.miiIrqs);
+		fprintf(f,"        link:     %s, 10%s-%s\n",
+				d->stats.linkStat & ANR24_LINK_UP   ? "up"   : "DOWN",
+				d->stats.linkStat & ANR24_SPEED_100 ? "0"    : "",
+				d->stats.linkStat & ANR24_FULLDUP   ? "full" : "half");
 	}
 
 	fprintf(f,"%i bogus IRQs detected\n",       amdEthBogusIrqs);
@@ -1209,7 +1356,12 @@ lance_write_csr(unsigned long val, int offset, AmdEthDev d)
 unsigned long flags;
 if ( !d ) d = &devices[0];
 	rtems_interrupt_disable(flags);
-	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->rdp);
+	{
+	RAPDECL;
+	unsigned long saved=*rap;
+	WriteIndReg(val,offset,rap,&d->baseAddr->rdp);
+	*rap = saved;
+	}
 	rtems_interrupt_enable(flags);
 }
 
@@ -1307,8 +1459,8 @@ read_counter(AmdEthDev d, int csr_no, volatile unsigned long *pHi)
 {
 unsigned short lo_1, lo_2;
 unsigned long  hi;
-register volatile unsigned long *rap = &d->baseAddr->rap;
-register volatile unsigned long *rdp = &d->baseAddr->rdp;
+RAPDECL;
+RDPDECL;
 
 		lo_1 = RCSR(csr_no);
 		hi   = *pHi;
@@ -1332,9 +1484,6 @@ int i;
 
 int amdEthCloseDev(AmdEthDev d)
 {
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
-
 	if ( d < devices || d >= devices + NumberOf(devices) ) {
 		fprintf(stderr,"Invalid device pointer\n");
 		return -1;
@@ -1343,11 +1492,13 @@ register volatile unsigned long *rdp;
 		fprintf(stderr,"Device not open\n");
 		return -1;
 	}
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
+{
+RAPDECL;
+RDPDECL;
 	/* STOP DMA */
 	WCSR( 0, CSR0_SETUP | CSR0_STOP);
 	/* disable interrupts */
+}
 	intDoDisable(d);
 	if (d->sync) {
 		/* delete sema; release blocked task with error  */

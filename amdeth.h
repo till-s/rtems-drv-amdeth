@@ -18,25 +18,44 @@ typedef struct EtherHeaderRec_	*EtherHeader;
  */
 int
 amdEthInit(AmdEthDev *d, int instance, int flags);
-/* whether to use/enable the receiver */
-#define AMDETH_FLG_USE_RX			(1<<0)
+/* Transmitter modes */
+#define AMDETH_FLG_TX_MODE_MSK		(0xf<<0)
+#define AMDETH_FLG_TX_MODE(flagword)	((flagword)&AMDETH_FLG_TX_MODE_MSK)
+
+/* TX unused / disabled */
+#define AMDETH_FLG_TX_MODE_OFF		(0<<0)
 /* whether to automatically update stats/clear TX errors
  * when in asynchronous TX mode
  */
-#define AMDETH_FLG_AUTO_TX_STATS	(1<<1)
+#define AMDETH_FLG_TX_MODE_AUTO		(1<<0)
+/* user must poll (call amdEthUpdateTxStats()) to release desc/update stats */
+#define AMDETH_FLG_TX_MODE_POLL		(2<<0)
+
+/* Receiver modes */
+#define AMDETH_FLG_RX_MODE_MSK		(0xf<<4)
+#define AMDETH_FLG_RX_MODE(flagword)	((flagword)&AMDETH_FLG_RX_MODE_MSK)
+
+/* RX unused / disabled */
+#define AMDETH_FLG_RX_MODE_OFF		(0<<4)
 /* whether to let the ISR automatically update
  * RX statistics and let the RX overwrite the
  * same buffer.
  */
-#define AMDETH_FLG_AUTO_RX			(1<<2)
+#define AMDETH_FLG_RX_MODE_AUTO		(1<<4)
+/* polled mode; user must call amdEthReceivePacket() to get status and provide new buffer */
+#define AMDETH_FLG_RX_MODE_POLL		(2<<4)
+/* synchronous mode; amdEthReceivePacket() blocks for a new packet */
+#define AMDETH_FLG_RX_MODE_SYNC		(3<<4)
+
+
 /* disable broadcast reception */
-#define AMDETH_FLG_NOBCST			(1<<4)
+#define AMDETH_FLG_NOBCST			(1<<8)
 
 /* I don't know of a way how to detect if the card has
  * a fiber or copper interface. Unfortunately, some
  * settings need to be different and hence YOU tell ME
  */
-#define AMDETH_FLG_FIBER			(1<<8)
+#define AMDETH_FLG_FIBER			(1<<9)
 
 /* stop and release a device
  * RETURNS: 0 on success, -1 on error (invalid d pointer)
