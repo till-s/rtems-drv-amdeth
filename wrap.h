@@ -2,6 +2,15 @@
 #define TILL_WRAPPER_H
 
 /* portability wrapper for semaphores and tasks */
+#include <stdio.h>
+
+#if defined(__vxworks)
+#include <vxWorks.h>
+#elif defined(__rtems)
+#include <rtems.h>
+#else
+#error "no OS type defined"
+#endif
 
 #ifdef  USE_PSEMA
 #include <semaphore.h>
@@ -63,7 +72,7 @@ pSemWait(PSemaId *ppsem)
 	return OK!=semTake(*ppsem,WAIT_FOREVER);
 }
 
-#elif defined(__RTEMS_APPLICATION__)
+#elif defined(__rtems)
 typedef rtems_id	PSemaId;
 
 inline int
@@ -115,7 +124,7 @@ typedef void * (*Task_T)(void*);
  */
 
 
-#define SCALE_PRIO(pri,min,max) ((((max)*254-(min))*(pri))/255)
+#define SCALE_PRIO(pri,min,max) (((max)*(255-(pri))-(min)*(pri))/255)
 
 #ifdef USE_PTHREAD
 
@@ -141,7 +150,7 @@ typedef int		PTaskArg;
 
 #define PTASK_LEAVE                 do { return 0; } while (0)
 
-#elif defined(__RTEMS_APPLICATION__)
+#elif defined(__rtems)
 #include <string.h>
 typedef rtems_id	PTaskId;
 
@@ -167,14 +176,14 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 					sched_get_priority_min(SCHED_FIFO),
 					sched_get_priority_max(SCHED_FIFO));
 #elif defined(__vxworks)
-	np = SCALE_PRIO(prio,0,255);
-#elif defined(__RTEMS_APPLICATION__)
+	np = SCALE_PRIO(prio,255,0);
+#elif defined(__rtems)
 	char	tmp[4]={0};
 	rtems_name rn;
-	np = SCALE_PRIO(prio,1,255);
+	np = SCALE_PRIO(prio,255,1);
 #endif
 
-	printf("task spawned at prio %i\n",np);
+	printf("spawning task at prio %i\n",np);
 
 #ifdef USE_PTHREAD
 	if (pthread_attr_init(&attr) ||
@@ -198,7 +207,7 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 			arg,0,0,0,0,0,0,0,0,0))) {
 		goto errout;
 	}
-#elif defined(__RTEMS_APPLICATION__)
+#elif defined(__rtems)
 	strncpy(tmp,name,4);
 	rn=rtems_build_name(tmp[0],tmp[1],tmp[2],tmp[3]);
 	if (stacksize<RTEMS_MINIMUM_STACK_SIZE)
