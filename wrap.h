@@ -33,25 +33,25 @@
 #include <semaphore.h>
 typedef sem_t		PSemaId;
 
-inline int
+static inline int
 pSemCreate(int binary, unsigned long init_count, PSemaId *ppsem)
 {
 	return sem_init(ppsem,0,init_count);
 }
 
-inline int
+static inline int
 pSemDestroy(PSemaId *ppsem)
 {
 	return sem_destroy(ppsem);
 }
 
-inline int
+static inline int
 pSemPost(PSemaId *ppsem)
 {
 	return sem_post(ppsem);
 }
 
-inline int
+static inline int
 pSemWait(PSemaId *ppsem)
 {
 	return sem_wait(ppsem);
@@ -94,7 +94,7 @@ pSemWait(PSemaId *ppsem)
 /* rtems native semaphores */
 typedef rtems_id	PSemaId;
 
-inline int
+static inline int
 pSemCreate(int binary, unsigned long init_count, PSemaId *ppsem)
 {
 	rtems_name sname=rtems_build_name('S',' ','0','0');
@@ -108,19 +108,19 @@ pSemCreate(int binary, unsigned long init_count, PSemaId *ppsem)
 			ppsem);
 }
 	
-inline int
+static inline int
 pSemDestroy(PSemaId *ppsem)
 {
 	return RTEMS_SUCCESSFUL != rtems_semaphore_delete(*ppsem);
 }
 
-inline int
+static inline int
 pSemPost(PSemaId *ppsem)
 {
 	return RTEMS_SUCCESSFUL != rtems_semaphore_release(*ppsem);
 }
 
-inline int
+static inline int
 pSemWait(PSemaId *ppsem)
 {
 	return RTEMS_SUCCESSFUL !=
@@ -143,7 +143,7 @@ typedef void * (*Task_T)(void*);
  */
 
 
-#define SCALE_PRIO(pri,min,max) (((max)*(255-(pri))-(min)*(pri))/255)
+#define SCALE_PRIO(pri,min,max) (((max)*(255-(pri))+(min)*(pri))/255)
 
 #ifdef USE_PTHREAD
 
@@ -187,7 +187,7 @@ typedef rtems_task_argument PTaskArg;
 
 typedef PTASK_DECL( (*PTaskEntryPoint), dummy);
 
-inline int
+static inline int
 pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 	   PTaskEntryPoint entry, PTaskArg arg, PTaskId *ptask)
 {
