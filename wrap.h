@@ -99,12 +99,18 @@ typedef rtems_id	PSemaId;
 static inline int
 pSemCreate(int binary, unsigned long init_count, PSemaId *ppsem)
 {
-	rtems_name sname=rtems_build_name('S',' ','0','0');
+static rtems_name sname=rtems_build_name('S',' ','0','0');
+	unsigned long flags;
+	rtems_name me;
+	
+	rtems_interrupt_disable(flags);
+	me = sname++;
+	rtems_interrupt_enable(flags);
 
-	return RTEMS_SUCCESSFUL!=rtems_semaphore_create(
-			sname++,
+	return RTEMS_SUCCESSFULE != rtems_semaphore_create(
+			me,
 			init_count,
-			(binary ? RTEMS_BINARY_SEMAPHORE | RTEMS_INHERIT_PRIORITY : RTEMS_COUNTING_SEMAPHORE)
+			(binary ? RTEMS_BINARY_SEMAPHORE | RTEMS_INHERIT_PRIORITY | RTEMS_PRIORITY : RTEMS_COUNTING_SEMAPHORE)
 				| RTEMS_FIFO,
 			0,
 			ppsem);
