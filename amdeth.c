@@ -19,7 +19,9 @@
 #include <bsp/pci.h>
 #include <bsp/irq.h>
 #include <libcpu/io.h>
-#include "bsp/bspExt.h"
+#ifdef HAVE_LIBBSPEXT
+#include <bsp/bspExt.h>
+#endif
 typedef unsigned int  pci_ulong;
 typedef unsigned char pci_ubyte;
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + PCI_MEM_BASE)
@@ -289,8 +291,10 @@ typedef struct EtherHeaderRec_ {
 
 /* TODO add mutex for driver access */
 typedef struct AmdEthDevRec_ {
+#ifndef HAVE_LIBBSPEXT
 	rtems_irq_connect_data	brokenbydesign;
 	struct AmdEthDevRec_	*next;			/* devices sharing a common interrupt */
+#endif
 	LanceRegs32	baseAddr;
 	int			irqLine;
 	RxBufDescU	rdesc[1];	/* one dummy descriptor */
@@ -352,15 +356,26 @@ unsigned long roundtrip;
 #define CSR7_SETUP	(CSR7_RTFLAGS)
 #define CSR15_SETUP	(CSR15_RTFLAGS)
 
+#ifndef HAVE_LIBBSPEXT
 static int  amdEthIntIsOn();
 static void amdEthIntEnable();
 static void amdEthIntDisable();
+#endif
+
 static void amdEthIsr();
 int amdEthUpdateTxStats(AmdEthDev d, int i);
 static unsigned long long read_counter(AmdEthDev d, int csr, volatile unsigned long *pHi);
 
-static AmdEthDevRec devices[NUM_ETH_DEVICES]={{{0},0},};
+static AmdEthDevRec devices[NUM_ETH_DEVICES]={
+{
+#ifndef HAVE_LIBBSPEXT
+  {0},
+#endif
+  0
+},
+};
 
+#ifndef HAVE_LIBBSPEXT
 /* Because we cannot pass an argument to the ISR, we must
  * work and hack :-(
  */
@@ -385,6 +400,7 @@ static void isrA() { amdEthIsr(insaneApiMap[0].device); }
 static void isrB() { amdEthIsr(insaneApiMap[1].device); }
 static void isrC() { amdEthIsr(insaneApiMap[2].device); }
 static void isrD() { amdEthIsr(insaneApiMap[3].device); }
+#endif
 
 #ifdef RXTEST
 static unsigned char rxbuffer[NumberOf(devices[0].rdesc)][2048];
@@ -402,8 +418,11 @@ WriteIndReg(
 	volatile unsigned long *areg,
 	volatile unsigned long *dreg)
 {
+register unsigned long flags;
+	rtems_interrupt_disable(flags);
 	__asm__ __volatile__(
 		"stwbrx %1, 0, %2; stwbrx %0, 0, %3": :"r"(value),"r"(idx),"r"(areg),"r"(dreg));
+	rtems_interrupt_enable(flags);
 }
 
 static inline unsigned long
@@ -412,10 +431,13 @@ ReadIndReg(
 	volatile unsigned long *areg, 
 	volatile unsigned long *dreg)
 {
+register unsigned long flags;
+	rtems_interrupt_disable(flags);
 	__asm__ __volatile__(
 		"stwbrx %0, 0, %2; eieio; lwbrx %0, 0, %3"
 		:"=r"(idx) 
 		:"0"(idx),"r"(areg),"r"(dreg));
+	rtems_interrupt_enable(flags);
 	return idx;
 }
 
@@ -478,7 +500,10 @@ register unsigned long	tmp;
 unsigned long			savedAR;
 int						bogusIrq = 1;
 
-	for ( ; d; d=d->next ) {
+#ifndef HAVE_LIBBSPEXT
+	for ( ; d; d=d->next )
+#endif
+	{
 
 		/* save the rap before changing it (don't care about endianness) */
 		savedAR = d->baseAddr->rap;
@@ -565,6 +590,30 @@ int						bogusIrq = 1;
 	amdEthBogusIrqs += bogusIrq;
 }
 
+static inline void
+intDoEnable(AmdEthDev d)
+{
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	rap = &d->baseAddr->rap;
+	rdp = &d->baseAddr->rdp;
+	WCSR( 0, RCSR(0) | CSR0_IENA);
+	WCSR( 5, RCSR(5) | CSR5_SINTE);
+}
+
+static inline void
+intDoDisable(AmdEthDev d)
+{
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	rap = &d->baseAddr->rap;
+	rdp = &d->baseAddr->rdp;
+	WCSR( 0, RCSR(0) & ~CSR0_IENA);
+	WCSR( 5, RCSR(0) & ~CSR5_SINTE);
+}
+
+
+#ifndef HAVE_LIBBSPEXT
 static int
 amdEthIntIsOn(const rtems_irq_connect_data *arg)
 {
@@ -583,17 +632,6 @@ register volatile unsigned long *rdp;
 	return 0;
 }
 
-static inline void
-intEnable(AmdEthDev d)
-{
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
-	WCSR( 0, RCSR(0) | CSR0_IENA);
-	WCSR( 5, RCSR(5) | CSR5_SINTE);
-}
-
 static void
 amdEthIntEnable(const rtems_irq_connect_data *arg)
 {
@@ -604,23 +642,12 @@ AmdEthDev	d;
 		if ( (d = insaneApiMap[i].device) &&
 			  d->brokenbydesign.name == arg->name) {
 			do {
-				intEnable(d);
+				intDoEnable(d);
 				d = d->next;
 			} while (d);
 			return;
 		}
 	}
-}
-
-static inline void
-intDisable(AmdEthDev d)
-{
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
-	WCSR( 0, RCSR(0) & ~CSR0_IENA);
-	WCSR( 5, RCSR(0) & ~CSR5_SINTE);
 }
 
 static void
@@ -633,13 +660,14 @@ AmdEthDev	d;
 		if ( (d = insaneApiMap[i].device) &&
 			  d->brokenbydesign.name == arg->name) {
 			do {
-				intDisable(d);
+				intDoDisable(d);
 				d = d->next;
 			} while (d);
 			return;
 		}
 	}
 }
+#endif
 
 int
 amdEthReceivePacket(AmdEthDev d, char *buf, int len)
@@ -698,7 +726,7 @@ register unsigned long rxstat;
 int
 amdEthInit(AmdEthDev *pd, int instance, int flags)
 {
-int		bus,dev,fun,i;
+int		bus,dev,fun,i,irqLine=-1;
 pci_ulong	tmp;
 pci_ubyte	tmpb;
 AmdEthDev	d;
@@ -734,9 +762,9 @@ AmdEthDev	d;
 	d->flags    = flags;
 
 	pciConfigInByte(bus,dev,fun,PCI_INTERRUPT_LINE,&tmpb);
-	d->irqLine=(unsigned char)tmpb;
+	irqLine=(unsigned char)tmpb;
 	fprintf(stderr,"%s Lance PCI ethernet found at 0x%08x (IRQ %i),",
-			dn, (unsigned int)d->baseAddr, d->irqLine);
+			dn, (unsigned int)d->baseAddr, irqLine);
 	amdEthPrintAddr(d, stderr, " hardware address: ");
 	fputc('\n',stderr);
 
@@ -807,7 +835,6 @@ AmdEthDev	d;
 
 	/* initialize the buffer descriptors */
 	{
-		int i;
 		/* fill the ethernet header */
 		/* send to broadcast */
 		amdEthHeaderInit(&d->header, 0, d);
@@ -842,11 +869,19 @@ AmdEthDev	d;
 		pSemCreate( 0/* binary */, 0 /* empty */, &d->sync);
 
 	/* install ISR */
+#ifdef HAVE_LIBBSPEXT
+	if ( bspExtInstallSharedISR(BSP_PCI_IRQ_LOWEST_OFFSET + irqLine, (void (*)(void*))amdEthIsr, (void*)d, 0) ) {
+		fprintf(stderr,"Unable to connect to interrupt\n");
+		return -1;
+	}
+	d->irqLine = irqLine;
+	intDoEnable(d);
+#else
 
 	d->brokenbydesign.on=amdEthIntEnable;
 	d->brokenbydesign.off=amdEthIntDisable;
 	d->brokenbydesign.isOn=amdEthIntIsOn;
-	d->brokenbydesign.name=BSP_PCI_IRQ0 + d->irqLine;
+	d->brokenbydesign.name=BSP_PCI_IRQ0 + (d->irqLine = irqLine);
 
 	/* is an ISR for our line already installed ? */
 	for (i = NumberOf(insaneApiMap) - 1; i >=0; i-- ) {
@@ -857,7 +892,7 @@ AmdEthDev	d;
 			d->next = d1;
 			insaneApiMap[i].device = d;
 			d->brokenbydesign.hdl  = insaneApiMap[i].isr;
-			intEnable(d);
+			intDoEnable(d);
 			break;
 		}
 	}
@@ -870,6 +905,7 @@ AmdEthDev	d;
 		d->brokenbydesign.hdl   = insaneApiMap[i].isr;
 		assert(BSP_install_rtems_irq_handler(&d->brokenbydesign));
 	}
+#endif
 
 
 	if (pd) *pd=d;
@@ -1036,28 +1072,32 @@ int	inc;
 
 /* routines for debugging / testing */
 unsigned long
-lance_read_csr(int offset)
+lance_read_csr(int offset,AmdEthDev d)
 {
-	return ReadIndReg(offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->rdp);
+if ( !d ) d = &devices[0];
+	return ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->rdp);
 
 }
 
 void
-lance_write_csr(unsigned long val, int offset)
+lance_write_csr(unsigned long val, int offset, AmdEthDev d)
 {
-	WriteIndReg(val,offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->rdp);
+if ( !d ) d = &devices[0];
+	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->rdp);
 }
 
 unsigned long
-lance_read_bcr(int offset)
+lance_read_bcr(int offset, AmdEthDev d)
 {
-	return ReadIndReg(offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->bdp);
+if ( !d ) d = &devices[0];
+	return ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->bdp);
 
 }
 void
-lance_write_bcr(unsigned long val, int offset)
+lance_write_bcr(unsigned long val, int offset, AmdEthDev d)
 {
-	WriteIndReg(val,offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->bdp);
+if ( !d ) d = &devices[0];
+	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->bdp);
 }
 
 /* how to read a two-word counter without disabling interrupts
@@ -1146,31 +1186,57 @@ register volatile unsigned long *rdp = &d->baseAddr->rdp;
 		return (hi<<16)|lo_2;
 }
 
+void
+_cexpModuleInitialize(void *mod)
+{
+int i;
+	for ( i=0; i<NumberOf(devices); i++ ) {
+		devices[i].irqLine = -1;
+	}
+}
+
+static void closeEthDev(AmdEthDev d)
+{
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	rap = &d->baseAddr->rap;
+	rdp = &d->baseAddr->rdp;
+	/* STOP DMA */
+	WCSR( 0, CSR0_SETUP | CSR0_STOP);
+	/* disable interrupts */
+	intDoDisable(d);
+	if (d->sync) {
+		/* release sema */
+		pSemPost(&d->sync);
+		/* delete sema  */
+		pSemDestroy(&d->sync);
+	}
+}
+
+
 int
 _cexpModuleFinalize(void *mod)
 {
 int		 	i;
 AmdEthDev	d;
-register volatile unsigned long *rap;
-register volatile unsigned long *rdp;
 	
+#ifdef HAVE_LIBBSPEXT
+	for ( d=devices, i=0; i<NumberOf(devices); i++, d++ ) {
+		if ( d->baseAddr ) {
+			closeEthDev(d);
+		}
+		if ( d->irqLine >= 0 ) {
+			bspExtRemoveSharedISR(BSP_PCI_IRQ_LOWEST_OFFSET + d->irqLine, (void (*)(void*))amdEthIsr, d);
+		}
+	}
+#else
 	for ( i=0; i < NumberOf(insaneApiMap); i++) {
 		for ( d=insaneApiMap[i].device; d; d=d->next) {
-			rap = &d->baseAddr->rap;
-			rdp = &d->baseAddr->rdp;
-			/* STOP DMA */
-			WCSR( 0, CSR0_SETUP | CSR0_STOP);
-			/* disable interrupts */
-			intDisable(d);
-			if (d->sync) {
-				/* release sema */
-				pSemPost(&d->sync);
-				/* delete sema  */
-				pSemDestroy(&d->sync);
-			}
+			closeEthDev(d);
 		}
 		/* uninstall ISR */
 		BSP_remove_rtems_irq_handler(&insaneApiMap[i].device->brokenbydesign);
 	}
+#endif
 	return 0;
 }
