@@ -229,12 +229,15 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 			PTHREAD_CREATE_JOINABLE
 #endif
 			) ||
+#ifndef __linux__ /* seems to be unimplemented */
+		pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED) ||
+#endif
 		pthread_attr_setschedparam(&attr,&schedparam)) {
-		MY_PRINTF("unable to set scheduling parameters\n");
+		MY_PRINTF("unable to set thread attributes\n");
 		goto errout;
 	}
 	if (pthread_create(ptask,&attr,entry,arg)){
-		MY_PRINTF("unable to create interlock thread\n");
+		MY_PRINTF("unable to create thread\n");
 		goto errout;
 	}
 #elif defined(__vxworks)
