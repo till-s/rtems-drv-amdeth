@@ -84,116 +84,147 @@ static inline unsigned long rdle(unsigned long *addr)
 #undef RXTEST
 
 /* register bit definitions */
-#define BCR19_PVALID	(1<<15) /* status: EEPROM (detected and contents) valid */
-#define BCR19_PREAD	(1<<14)	/* EEPROM read command bit */
-#define BCR19_EEDET	(1<<13)	/* EEPROM detect */
-#define BCR19_EEN	(1<<4)	/* EEPROM port enable */
-#define BCR19_ECS	(1<<2)	/* EEPROM chip select */
-#define BCR19_ESK	(1<<1)	/* EEPROM serial clock */
-#define BCR19_EDIO	(1<<0)	/* EEPROM data in/out */
+#define BCR2_SMIUEN			(1<<15)	/* 975 only */
+#define BCR2_DISSCR_SFEX	(1<<14)	/* disable scrambler; MUST SET FOR PECL (FIBER PORT) */
+#define BCR2_PHYSELEN		(1<<13)	/* enable writes to BCR18[4:3] */
+#define BCR2_LEDPE			(1<<12)	/* LED program enable; (enables writes to LED regs) */
+#define BCR2_RESET_SFEX		(1<<11)	/* hold internal PHY in RESET */
+#define BCR2_I2C_M3			(1<<10)	/* 975 only */
+#define BCR2_I2C_M2			(1<<9)	/* 975 only */
+#define BCR2_APROMWE		(1<<8)	/* enable writes to address prom (i.e., shadow ram) */
+#define BCR2_INTLEVEL		(1<<7)	/* interrupt pin level(0) or edge (1) */
+#define BCR2_I2C_M1			(1<<6)	/* 975 only */
+#define BCR2_I2C_M0			(1<<5)	/* 975 only */
+#define BCR2_I2C_N2			(1<<4)	/* 975 only */
+#define BCR2_I2C_EADISEL	(1<<3)	/* EADI select; (external address select); muxes some pins */
+#define BCR2_SLEEP_SFEX		(1<<2)	/* sleep PHY, reduce power comsumption */
+#define BCR2_I2C_N1			(1<<1)	/* 975 only */
+#define BCR2_ASEL			(1<<1)	/* Auto Select media interface port; */
+									/* if 1 and MIIPD (BCR32[14]) is 1 -> MII port.
+									 * in addition, if DANAS (BCR32[7]) is 0,
+									 * external PHY is automatically configured.
+									 * If ASEL==0, PORTSEL bits define port.
+									 */
+#define BCR2_I2C_N0			(1<<0)	/* 975 only */
 
-#define BCR20_SWSTYLE_3	0x0003
+#define BCR19_PVALID		(1<<15) /* status: EEPROM (detected and contents) valid */
+#define BCR19_PREAD			(1<<14)	/* EEPROM read command bit */
+#define BCR19_EEDET			(1<<13)	/* EEPROM detect */
+#define BCR19_EEN			(1<<4)	/* EEPROM port enable */
+#define BCR19_ECS			(1<<2)	/* EEPROM chip select */
+#define BCR19_ESK			(1<<1)	/* EEPROM serial clock */
+#define BCR19_EDIO			(1<<0)	/* EEPROM data in/out */
 
-#define CSR0_ERR	(1<<15)	/* status: cerr | miss | merr */
-#define CSR0_CERR	(1<<13)	/* status: collision error */
-#define CSR0_MISS	(1<<12)	/* status: missed frame interrupt */
-#define CSR0_MERR	(1<<11)	/* status: memory error interrupt */
-#define CSR0_RINT	(1<<10)	/* status: rx interrupt */
-#define CSR0_TINT	(1<<9)	/* status: tx interrupt */
-#define CSR0_IDON	(1<<8)	/* status: init done interrupt */
-#define CSR0_INTR	(1<<7)	/* status: any interrupt */
-#define CSR0_IENA	(1<<6)	/* enable interrupts */
-#define CSR0_RXON	(1<<5)	/* receiver enabled (RO) */
-#define CSR0_TXON	(1<<4)	/* transmitter enabled (RO) */
-#define CSR0_TDMD	(1<<3)	/* demand transmission */
-#define CSR0_STOP	(1<<2)	/* STOP all DMA activity */
-#define CSR0_STRT	(1<<1)	/* START */
-#define CSR0_INIT	(1<<0)	/* read init block */
-#define CSR0_IRQ_STAT	( CSR0_MISS | CSR0_MERR | CSR0_RINT | CSR0_TINT | CSR0_IDON)
+#define BCR20_SWSTYLE_3		0x0003
+
+#define BCR25_SRAMSIZE		(0xff)
+#define BCR27_LOLATRX		(1<<14)	/* low latency RX function; requires 
+									 * SRAM > 0
+									 * CSR127(RPA) = 1
+									 */
+
+#define CSR0_ERR			(1<<15)	/* status: cerr | miss | merr */
+#define CSR0_CERR			(1<<13)	/* status: collision error */
+#define CSR0_MISS			(1<<12)	/* status: missed frame interrupt */
+#define CSR0_MERR			(1<<11)	/* status: memory error interrupt */
+#define CSR0_RINT			(1<<10)	/* status: rx interrupt */
+#define CSR0_TINT			(1<<9)	/* status: tx interrupt */
+#define CSR0_IDON			(1<<8)	/* status: init done interrupt */
+#define CSR0_INTR			(1<<7)	/* status: any interrupt */
+#define CSR0_IENA			(1<<6)	/* enable interrupts */
+#define CSR0_RXON			(1<<5)	/* receiver enabled (RO) */
+#define CSR0_TXON			(1<<4)	/* transmitter enabled (RO) */
+#define CSR0_TDMD			(1<<3)	/* demand transmission */
+#define CSR0_STOP			(1<<2)	/* STOP all DMA activity */
+#define CSR0_STRT			(1<<1)	/* START */
+#define CSR0_INIT			(1<<0)	/* read init block */
+#define CSR0_IRQ_STAT		( CSR0_MISS | CSR0_MERR | CSR0_RINT | CSR0_TINT | CSR0_IDON)
 
 
-#define CSR3_MISSM	(1<<12)	/* mask missed frame irq */
-#define CSR3_MERRM	(1<<11)	/* mask memory error irq */
-#define CSR3_RINTM	(1<<10)	/* mask rx irq */
-#define CSR3_TINTM	(1<<9)	/* mask tx irq */
-#define CSR3_IDONM	(1<<8)	/* mask init done irq */
-#define CSR3_IRQ_MSK	(CSR3_MISSM | CSR3_MERRM | CSR3_RINTM | CSR3_TINTM | CSR3_IDONM)
-#define CSR3_DXSUFLO	(1<<6)	/* disable xmit stop on underflow error */
-#define CSR3_LAPPEN	(1<<5)	/* enable look ahead packet procesing */
-#define CSR3_DXMT2PD	(1<<4)	/* disable xmit two part deferral */
-#define CSR3_EMBA	(1<<3)	/* enable modified backoff algorithm */
-#define CSR3_BSWP	(1<<2)	/* byte swap (FIFO access only) */
+#define CSR3_MISSM			(1<<12)	/* mask missed frame irq */
+#define CSR3_MERRM			(1<<11)	/* mask memory error irq */
+#define CSR3_RINTM			(1<<10)	/* mask rx irq */
+#define CSR3_TINTM			(1<<9)	/* mask tx irq */
+#define CSR3_IDONM			(1<<8)	/* mask init done irq */
+#define CSR3_IRQ_MSK		(CSR3_MISSM | CSR3_MERRM | CSR3_RINTM | CSR3_TINTM | CSR3_IDONM)
+#define CSR3_DXSUFLO		(1<<6)	/* disable xmit stop on underflow error */
+#define CSR3_LAPPEN			(1<<5)	/* enable look ahead packet procesing */
+#define CSR3_DXMT2PD		(1<<4)	/* disable xmit two part deferral */
+#define CSR3_EMBA			(1<<3)	/* enable modified backoff algorithm */
+#define CSR3_BSWP			(1<<2)	/* byte swap (FIFO access only) */
 
-#define CSR4_TXDPOLL	(1<<12)	/* disable tx polling */
-#define CSR4_APAD_XMT	(1<<11)	/* autopad transmission */
-#define CSR4_ASTRP_RCV	(1<<10) /* autostrip padded reception */
-#define CSR4_MFCO	(1<<9)	/* status: missed frame counter overflow */
-#define CSR4_MFCOM	(1<<8)	/* mask missed frame cnt ovfl irq */
-#define CSR4_UINTCMD	(1<<7)	/* user irq command */
-#define CSR4_UINT	(1<<6)	/* status: user command irq */
-#define CSR4_RCVCCO	(1<<5)	/* status: rx collision counter overflow */
-#define CSR4_RCVCCOM	(1<<4)	/* mask rx collision cnt ovfl irq */
-#define CSR4_TXSTRT	(1<<3)	/* status: xmission started */
-#define CSR4_TXSTRTM	(1<<2)	/* mask TXSTRT irq */
-#define CSR4_IRQ_MSK	(CSR4_MFCOM | CSR4_RCVCCOM | CSR4_TXSTRTM)
-#define CSR4_IRQ_STAT	(CSR4_MFCO | CSR4_UINT | CSR4_RCVCCO | CSR4_TXSTRT)
+#define CSR4_TXDPOLL		(1<<12)	/* disable tx polling */
+#define CSR4_APAD_XMT		(1<<11)	/* autopad transmission */
+#define CSR4_ASTRP_RCV		(1<<10) /* autostrip padded reception */
+#define CSR4_MFCO			(1<<9)	/* status: missed frame counter overflow */
+#define CSR4_MFCOM			(1<<8)	/* mask missed frame cnt ovfl irq */
+#define CSR4_UINTCMD		(1<<7)	/* user irq command */
+#define CSR4_UINT			(1<<6)	/* status: user command irq */
+#define CSR4_RCVCCO			(1<<5)	/* status: rx collision counter overflow */
+#define CSR4_RCVCCOM		(1<<4)	/* mask rx collision cnt ovfl irq */
+#define CSR4_TXSTRT			(1<<3)	/* status: xmission started */
+#define CSR4_TXSTRTM		(1<<2)	/* mask TXSTRT irq */
+#define CSR4_IRQ_MSK		(CSR4_MFCOM | CSR4_RCVCCOM | CSR4_TXSTRTM)
+#define CSR4_IRQ_STAT		(CSR4_MFCO | CSR4_UINT | CSR4_RCVCCO | CSR4_TXSTRT)
 
-#define CSR5_TOKINTD	(1<<15)	/* disable xmit ok irq */
-#define CSR5_LTINTEN	(1<<14)	/* enable last xmit irq */
-#define CSR5_SINT	(1<<11)	/* status: system error (bus master) irq */
-#define CSR5_SINTE	(1<<10)	/* enable system error irq */
-#define CSR5_EXDINT	(1<<7)	/* status: excessive deferral irq */
-#define CSR5_EXDINTE	(1<<6)	/* enable excessive deferral irq */
-#define CSR5_MPPLBA	(1<<5)	/* magic packet physical logical broadcast */
-#define CSR5_MPINT	(1<<4)	/* status: magic packet irq */
-#define CSR5_MPINTE	(1<<3)	/* enable magic packet irq */
-#define CSR5_MPEN	(1<<2)	/* enable magic packet */
-#define CSR5_MPMODE	(1<<1)	/* magic packet mode */
-#define CSR5_SPND	(1<<0)	/* request entrance into suspend mode */
-#define CSR5_IRQ_STAT	(CSR5_SINT | CSR5_EXDINT | CSR5_MPINT)
+#define CSR5_TOKINTD		(1<<15)	/* disable xmit ok irq */
+#define CSR5_LTINTEN		(1<<14)	/* enable last xmit irq */
+#define CSR5_SINT			(1<<11)	/* status: system error (bus master) irq */
+#define CSR5_SINTE			(1<<10)	/* enable system error irq */
+#define CSR5_EXDINT			(1<<7)	/* status: excessive deferral irq */
+#define CSR5_EXDINTE		(1<<6)	/* enable excessive deferral irq */
+#define CSR5_MPPLBA			(1<<5)	/* magic packet physical logical broadcast */
+#define CSR5_MPINT			(1<<4)	/* status: magic packet irq */
+#define CSR5_MPINTE			(1<<3)	/* enable magic packet irq */
+#define CSR5_MPEN			(1<<2)	/* enable magic packet */
+#define CSR5_MPMODE			(1<<1)	/* magic packet mode */
+#define CSR5_SPND			(1<<0)	/* request entrance into suspend mode */
+#define CSR5_IRQ_STAT		(CSR5_SINT | CSR5_EXDINT | CSR5_MPINT)
 
-#define CSR7_FASTSPNDE	(1<<15)	/* fast suspend enable */
-#define CSR7_RXFRTG	(1<<14)	/* receive frame tag */
-#define CSR7_RDMD	(1<<13)	/* receive demand (rx poll immediately) */
-#define CSR7_RXDPOLL	(1<<12)	/* disable rx polling */
-#define CSR7_STINT	(1<<11)	/* status: software timer interrupt */
-#define CSR7_STINTE	(1<<10)	/* enable software timer irq */
-#define CSR7_MREINT	(1<<9)	/* status: phy management read error irq */
-#define CSR7_MREINTE	(1<<8)	/* enable phy management error irq */
-#define CSR7_MAPINT	(1<<7)	/* status: phy management auto poll irq (status change) */
-#define CSR7_MAPINTE	(1<<6)	/* enable phy management auto poll irq */
-#define CSR7_MCCINT	(1<<5)	/* status: phy management command complete irq */
-#define CSR7_MCCINTE	(1<<4)	/* enable MCCINT */
-#define CSR7_MCCIINT	(1<<3)	/* status: phy management command complete internal irq */
-#define CSR7_MCCIINTE	(1<<2)	/* enable MCCIINT */
-#define CSR7_MIIPDTINT	(1<<1)	/* status: phy detect transition irq */
-#define CSR7_MIIPDTINTE	(1<<0)	/* enable MIIPDTINT */
-#define CSR7_IRQ_STAT   (CSR7_STINT | CSR7_MREINT | CSR7_MAPINT | CSR7_MCCINT | CSR7_MCCIINT | CSR7_MIIPDTINT)
+#define CSR7_FASTSPNDE		(1<<15)	/* fast suspend enable */
+#define CSR7_RXFRTG			(1<<14)	/* receive frame tag */
+#define CSR7_RDMD			(1<<13)	/* receive demand (rx poll immediately) */
+#define CSR7_RXDPOLL		(1<<12)	/* disable rx polling */
+#define CSR7_STINT			(1<<11)	/* status: software timer interrupt */
+#define CSR7_STINTE			(1<<10)	/* enable software timer irq */
+#define CSR7_MREINT			(1<<9)	/* status: phy management read error irq */
+#define CSR7_MREINTE		(1<<8)	/* enable phy management error irq */
+#define CSR7_MAPINT			(1<<7)	/* status: phy management auto poll irq (status change) */
+#define CSR7_MAPINTE		(1<<6)	/* enable phy management auto poll irq */
+#define CSR7_MCCINT			(1<<5)	/* status: phy management command complete irq */
+#define CSR7_MCCINTE		(1<<4)	/* enable MCCINT */
+#define CSR7_MCCIINT		(1<<3)	/* status: phy management command complete internal irq */
+#define CSR7_MCCIINTE		(1<<2)	/* enable MCCIINT */
+#define CSR7_MIIPDTINT		(1<<1)	/* status: phy detect transition irq */
+#define CSR7_MIIPDTINTE		(1<<0)	/* enable MIIPDTINT */
+#define CSR7_IRQ_STAT  		(CSR7_STINT | CSR7_MREINT | CSR7_MAPINT | CSR7_MCCINT | CSR7_MCCIINT | CSR7_MIIPDTINT)
 
-#define CSR15_PROM	(1<<15) /* promiscuous mode */
-#define CSR15_DRCVBC	(1<<14)	/* disable receive broadcast */
-#define CSR15_DFRCVPA	(1<<13)	/* disable receive physical address */
-#define CSR15_PORTSEL	(3<<7)	/* select network medium (must be 11b) */
-#define CSR15_INTL	(1<<6)	/* internal loopback */
-#define CSR15_DRTY	(1<<5)	/* disable retry */
-#define CSR15_FCOLL	(1<<4)	/* force collision */
-#define CSR15_DXMTFCS	(1<<3)	/* disable transmit crc (FCS) */
-#define CSR15_LOOP	(1<<2)	/* loopback enable */
-#define CSR15_DTX	(1<<1)	/* disable transmitter */
-#define CSR15_DRX	(1<<0)	/* disable receiver */
+#define CSR15_PROM			(1<<15) /* promiscuous mode */
+#define CSR15_DRCVBC		(1<<14)	/* disable receive broadcast */
+#define CSR15_DFRCVPA		(1<<13)	/* disable receive physical address */
+#define CSR15_PORTSEL		(3<<7)	/* select network medium (must be 11b) */
+#define CSR15_INTL			(1<<6)	/* internal loopback */
+#define CSR15_DRTY			(1<<5)	/* disable retry */
+#define CSR15_FCOLL			(1<<4)	/* force collision */
+#define CSR15_DXMTFCS		(1<<3)	/* disable transmit crc (FCS) */
+#define CSR15_LOOP			(1<<2)	/* loopback enable */
+#define CSR15_DTX			(1<<1)	/* disable transmitter */
+#define CSR15_DRX			(1<<0)	/* disable receiver */
 
-#define CSR80_RCVFW_16	(0<<12)	/* rxc fifo watermark = 16 */
-#define CSR80_RCVFW_64	(1<<12)	/* rxc fifo watermark = 64 */
-#define CSR80_RCVFW_112	(2<<12)	/* rxc fifo watermark = 112 */
-#define CSR80_XMTSP_MIN	(0<<10) /* tx start point 20 (36 if SRAM_SIZE > 0) */
-#define CSR80_XMTSP_64	(1<<10) /* tx start point 64 */
-#define CSR80_XMTSP_128	(2<<10) /* tx start point 128 */
-#define CSR80_XMTSP_MAX	(3<<10) /* tx start point 220 (full packet if NOUFLO is set) */
-#define CSR80_XMTFW_16	(0<<8)	/* tx fifo watermark (for DMA request) = 16 */
-#define CSR80_XMTFW_64	(1<<8)	/* tx fifo watermark (for DMA request) = 64 */
-#define CSR80_XMTFW_108	(2<<8)	/* tx fifo watermark (for DMA request) = 108 */
+#define CSR80_RCVFW_16		(0<<12)	/* rxc fifo watermark = 16 */
+#define CSR80_RCVFW_64		(1<<12)	/* rxc fifo watermark = 64 */
+#define CSR80_RCVFW_112		(2<<12)	/* rxc fifo watermark = 112 */
+#define CSR80_XMTSP_MIN		(0<<10) /* tx start point 20 (36 if SRAM_SIZE > 0) */
+#define CSR80_XMTSP_64		(1<<10) /* tx start point 64 */
+#define CSR80_XMTSP_128		(2<<10) /* tx start point 128 */
+#define CSR80_XMTSP_MAX		(3<<10) /* tx start point 220 (full packet if NOUFLO is set) */
+#define CSR80_XMTFW_16		(0<<8)	/* tx fifo watermark (for DMA request) = 16 */
+#define CSR80_XMTFW_64		(1<<8)	/* tx fifo watermark (for DMA request) = 64 */
+#define CSR80_XMTFW_108		(2<<8)	/* tx fifo watermark (for DMA request) = 108 */
+	
+#define CSR100_MERRTO_MASK	((1<<16)-1)	/* PCI latency timer in .1us */
 
-#define CSR100_MERRTO_MASK ((1<<16)-1)	/* PCI latency timer in .1us */
+#define CSR124_RPA			(1<<3)	/* runt packet accept */
 
 
 typedef struct LanceRegs32Rec_ {
@@ -367,7 +398,7 @@ unsigned long roundtrip;
 #define CSR0_SETUP	(0)
 #define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_TINTM | CSR3_RINTM)) | CSR3_DXSUFLO)
 #define CSR4_SETUP	((CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) | CSR4_RTFLAGS)
-#define CSR5_SETUP	(CSR5_TOKINTD)
+#define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE)
 #define CSR7_SETUP	(CSR7_RTFLAGS)
 #define CSR15_SETUP	(CSR15_RTFLAGS)
 
@@ -549,7 +580,7 @@ static void
 amdEthIsr(AmdEthDev	d)
 {
 register volatile unsigned long *rap, *rdp;
-register unsigned long	tmp;
+register unsigned long	csr0, csr5, csr4;
 unsigned long			savedAR;
 int						bogusIrq = 1;
 
@@ -564,10 +595,10 @@ int						bogusIrq = 1;
 		rap = &d->baseAddr->rap;
 		rdp = &d->baseAddr->rdp;
 
-		if ( ((tmp=RCSR(0)) & CSR0_INTR) ) {
+		if ( ((csr0=RCSR(0)) & CSR0_INTR) ) {
 			/* to check: EXDINT, IDON, MERR, MISS, MFCO, RCVCCO, RINT,
 			 * done (lowercase - x: unused):
-			 *                x   x    merr  miss  mfco  rcvcco  rint
+			 *              def   x    merr  miss  mfco  rcvcco  rint
 			 * register:
 			 *             csr5  csr0  csr0  csr0   csr4   csr4  csr0 
 			 *           SINT, TINT, TXSTRT, UINT, STINT, MREINT, MCCINT,
@@ -580,28 +611,24 @@ int						bogusIrq = 1;
 			d->stats.irqs++;
 			bogusIrq = 0;
 #if 0
-			if ( tmp & CSR0_MISS ) {
+			if ( csr0 & CSR0_MISS ) {
 				/* missed frame - we use the hardware counter but action
 				 * could be taken here also, maybe post a special event...
 				 */
 			}
 #endif
-			if ( tmp & CSR0_MERR ) {
+			if ( csr0 & CSR0_MERR ) {
 				/* memory / PCI bus error */
 				d->stats.rxMemory++;
 			}
-			if ( tmp & CSR0_TINT ) {
-				/* TS interrupt not used */
-				if (AMDETH_FLG_AUTO_TX_STATS & d->flags) {
-					amdEthUpdateTxStats(d,(unsigned)-1);
-				}
-			}
+
+			/* TS interrupt not used */
 #if 0	
 		/* We post to the receiver in any case the controller has
 		 * released the descriptor. (NO)
 		 */
 #endif
-			if ( tmp & CSR0_RINT ) {
+			if ( csr0 & CSR0_RINT ) {
 				/* received a packet, post an event */
 				register unsigned long dstat = rdle(&d->rdesc[0].STYLE.statLE);
 				if ( ! (dstat & RXDESC_STAT_OWN) ) {
@@ -618,25 +645,29 @@ int						bogusIrq = 1;
 				}
 			}
 			/* clear raised flags */
-	 		WCSR(0,tmp);
+	 		WCSR(0,csr0);
 
 			/* handle user and the counter rollover interrupts */
-			tmp=RCSR(4);
-			if (tmp & CSR4_MFCO)
+			csr4=RCSR(4);
+			if (csr4 & CSR4_MFCO)
 				d->stats.rxOverrunHi++;
-			if (tmp & CSR4_RCVCCO)
+			if (csr4 & CSR4_RCVCCO)
 				d->stats.rxCollisionHi++;
 			/* clear raised flags */
-			WCSR(4,tmp);
+			WCSR(4,csr4);
 
-			tmp=RCSR(5);
-			if (tmp & CSR5_SINT) {
+			csr5=RCSR(5);
+			if (csr5 & CSR5_SINT) {
 				/* this is probably really bad */
 				d->stats.sysError++;
 				/* TODO we should do something here */
 			}
-			WCSR(5,tmp);
 
+			if (   (AMDETH_FLG_AUTO_TX_STATS & d->flags)
+			    && ((CSR0_TINT & csr0) || (CSR5_EXDINT & csr5)) ) {
+					amdEthUpdateTxStats(d,(unsigned)-1);
+			}
+			WCSR(5,csr5);
 		}
 
 		/* restore address register contents */
@@ -729,6 +760,14 @@ int
 amdEthReceivePacket(AmdEthDev d, char *buf, int len)
 {
 int						rval;
+
+	if ( !(d->flags & AMDETH_FLG_USE_RX) )
+		return AMDETH_ERROR;
+
+	/* can't call this again if in AUTO_RX mode */
+	if ( (rdle(&d->rdesc[0].STYLE.statLE) & RXDESC_STAT_OWN) ||
+	     ((d->flags & AMDETH_FLG_AUTO_RX) && d->rdesc[0].STYLE.rbadrLE )  )
+		return AMDETH_BUSY;
 
 	/* setup the RX descriptor */
 	wrle(LOCAL2PCI(buf),&d->rdesc[0].STYLE.rbadrLE);
@@ -837,6 +876,11 @@ AmdEthDev	d;
 		assert( lanceBCR19 & BCR19_PVALID );
 		}
 
+#if 0 /* not yet ready - unsure if really needed */
+		/* set LOLATRX (requires SRAM > 0, CSR127(RPA) ) */
+		WBCR(27, RBCR(27) | BCR27_LOLATRX);
+#endif
+
 		/* clear interrupt and mask unneeded sources */
 		WCSR(0,  CSR0_SETUP | CSR0_IRQ_STAT);
 
@@ -901,6 +945,19 @@ AmdEthDev	d;
 	}
 
 		WCSR(0, CSR0_SETUP | CSR0_STRT);
+		/* I don't know of a way how to detect if the card has
+		 * a fiber or copper interface. Unfortunately, some
+ 		 * settings need to be different and hence YOU tell ME
+ 		 */
+		if ( AMDETH_FLG_FIBER & flags ) {
+			/* Scrambler/descrambler needs to be disabled (datasheet).
+			 * If I don't do this, the link still works but experiences
+			 * quite high bit errors (CRC errors)!
+			 */
+			WCSR(2, RCSR(2) | BCR2_DISSCR_SFEX);
+		} else {
+			WCSR(2, RCSR(2) & ~BCR2_DISSCR_SFEX);
+		}
 	}
 
 	/* RTEMS binary semaphores allow nesting and are not
@@ -984,10 +1041,6 @@ int		rval = 0;
 		continue;
 
 	/* update statistics */
-#ifdef RT_DRIVER
-	if ( csr1 & TXDESC_CSR1_DEF )
-		d->stats.txDeferred++;
-#endif
 	csr2=rdle(&d->tdesc[i].STYLE.csr2LE);
 
 	if (csr2 & TXDESC_CSR2_UFLO)
@@ -1000,6 +1053,15 @@ int		rval = 0;
 		d->stats.txRetry++;
 	if (csr1 & TXDESC_CSR1_BPE)
 		d->stats.txBusParity++;
+
+	if (
+#ifdef RT_DRIVER
+		(csr1 & TXDESC_CSR1_DEF) ||
+#endif
+		(csr2 & TXDESC_CSR2_EXDEF) ) {
+		
+		d->stats.txDeferred++;
+	}
 
 	/* reset error bit */
 	wrle( csr1 & ~ TXDESC_ERRS,

@@ -32,6 +32,12 @@ amdEthInit(AmdEthDev *d, int instance, int flags);
 /* disable broadcast reception */
 #define AMDETH_FLG_NOBCST			(1<<4)
 
+/* I don't know of a way how to detect if the card has
+ * a fiber or copper interface. Unfortunately, some
+ * settings need to be different and hence YOU tell ME
+ */
+#define AMDETH_FLG_FIBER			(1<<8)
+
 /* stop and release a device
  * RETURNS: 0 on success, -1 on error (invalid d pointer)
  */
