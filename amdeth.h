@@ -27,7 +27,7 @@ typedef unsigned char pci_ubyte;
 typedef struct AmdEthDevRec_	*AmdEthDev;
 typedef struct EtherHeaderRec_	*EtherHeader;
 
-/* error codes */
+/* error codes - some code relies on them being < 0 */
 #define AMDETH_OK		0
 #define AMDETH_ERROR		(-1)
 #define AMDETH_BUSY		(-2)
@@ -36,7 +36,8 @@ typedef struct EtherHeaderRec_	*EtherHeader;
  * which is returned in d.
  */
 int
-amdEthInit(AmdEthDev *d, int instance);
+amdEthInit(AmdEthDev *d, int instance, int flags);
+#define AMDETH_FLG_USE_RX	(1<<0)
 
 /* initialize an ethernet/snap header
  *  - if dst!= 0, fill in the destination address

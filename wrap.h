@@ -5,12 +5,14 @@
 /* portability wrapper for semaphores and tasks
  * Author: Till Straumann <strauman@slac.stanford.edu>, 10/2001
  */
+#ifndef MY_PRINTF /* give user the possibility to define to an empty macro */
 #ifndef __linux__
 #include <stdio.h>
-#define MY_PRINTF printf
+#define MY_PRINTF(arg...) printf(arg)
 #else
 #include <linux/kernel.h>
-#define MY_PRINTF printk
+#define MY_PRINTF(arg...) printk(arg)
+#endif
 #endif
 
 #if defined(__vxworks)
@@ -181,7 +183,7 @@ typedef rtems_task_argument PTaskArg;
 
 #define PTASK_DECL(entry_point,arg) rtems_task entry_point(PTaskArg arg)
 /* TODO: I believe the RTEMS native task should delete itself when leaving */
-#define PTASK_LEAVE                 do { } while (0)
+#define PTASK_LEAVE                 do { rtems_task_delete(RTEMS_SELF); } while (0)
 
 #endif
 
