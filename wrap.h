@@ -1,17 +1,34 @@
 #ifndef TILL_WRAPPER_H
 #define TILL_WRAPPER_H
+/* $Id$ */
 
-/* portability wrapper for semaphores and tasks */
+/* portability wrapper for semaphores and tasks
+ * Author: Till Straumann <strauman@slac.stanford.edu>, 10/2001
+ */
+#ifndef __linux__
 #include <stdio.h>
+#define MY_PRINTF printf
+#else
+#include <linux/kernel.h>
+#define MY_PRINTF printk
+#endif
 
 #if defined(__vxworks)
 #include <vxWorks.h>
 #elif defined(__rtems)
 #include <rtems.h>
+#elif defined(__linux__)
+#ifndef USE_PTHREAD
+#define USE_PTHREAD
+#endif
+#ifndef USE_PSEMA
+#define USE_PSEMA
+#endif
 #else
 #error "no OS type defined"
 #endif
 
+/* Use POSIX semaphores */
 #ifdef  USE_PSEMA
 #include <semaphore.h>
 typedef sem_t		PSemaId;
@@ -41,6 +58,7 @@ pSemWait(PSemaId *ppsem)
 }
 
 #elif defined(__vxworks)
+/* vxworks native semaphores */
 
 #include <vxWorks.h>
 #include <semLib.h>
@@ -73,6 +91,7 @@ pSemWait(PSemaId *ppsem)
 }
 
 #elif defined(__rtems)
+/* rtems native semaphores */
 typedef rtems_id	PSemaId;
 
 inline int
@@ -129,7 +148,11 @@ typedef void * (*Task_T)(void*);
 #ifdef USE_PTHREAD
 
 #include <pthread.h>
+#ifndef __linux__
 #include <sched.h>
+#else
+#include <rtl_sched.h>
+#endif
 typedef pthread_t	PTaskId;
 
 typedef void*		PTaskArg;
@@ -157,6 +180,7 @@ typedef rtems_id	PTaskId;
 typedef rtems_task_argument PTaskArg;
 
 #define PTASK_DECL(entry_point,arg) rtems_task entry_point(PTaskArg arg)
+/* TODO: I believe the RTEMS native task should delete itself when leaving */
 #define PTASK_LEAVE                 do { } while (0)
 
 #endif
@@ -183,17 +207,26 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 	np = SCALE_PRIO(prio,255,1);
 #endif
 
-	printf("spawning task at prio %i\n",np);
+	MY_PRINTF("spawning task at prio %i\n",np);
 
 #ifdef USE_PTHREAD
 	if (pthread_attr_init(&attr) ||
+#ifndef __linux__ /* seems to be unimplemented */
 		pthread_attr_setschedpolicy(&attr,SCHED_FIFO) ||
+#endif
+		pthread_attr_setdetachstate(&attr,
+#if 0
+			PTHREAD_CREATE_DETACHED
+#else
+			PTHREAD_CREATE_JOINABLE
+#endif
+			) ||
 		pthread_attr_setschedparam(&attr,&schedparam)) {
-		printf("unable to set scheduling parameters\n");
+		MY_PRINTF("unable to set scheduling parameters\n");
 		goto errout;
 	}
 	if (pthread_create(ptask,&attr,entry,arg)){
-		printf("unable to create interlock thread\n");
+		MY_PRINTF("unable to create interlock thread\n");
 		goto errout;
 	}
 #elif defined(__vxworks)
@@ -225,6 +258,8 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 			arg))
 		goto errout;
 
+#else
+#error "I don't know how to spawn a task on this OS"
 #endif
 	return 0;
 errout:
