@@ -1041,6 +1041,7 @@ lance_read_csr(int offset)
 	return ReadIndReg(offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->rdp);
 
 }
+
 void
 lance_write_csr(unsigned long val, int offset)
 {
@@ -1145,7 +1146,7 @@ register volatile unsigned long *rdp = &d->baseAddr->rdp;
 		return (hi<<16)|lo_2;
 }
 
-static int
+int
 _cexpModuleFinalize(void *mod)
 {
 int		 	i;
