@@ -1,5 +1,7 @@
 /* $Id$ */
 
+/* Author: Till Straumann, <strauman@slac.stanford.edu> 7/2001 */
+
 #include <assert.h>
 #include <stdio.h>
 
@@ -9,13 +11,12 @@
 #include <rtems.h>
 #include <bsp/pci.h>
 #include <libcpu/io.h>
-/* let bsp.h fix the _ISA_MEM_BASE & friends symbols */
-#warning "TODO fix _ISA_MEM_BASE hack"
 #include <bsp.h>
 #include "bspExt.h"
-#define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + _ISA_MEM_BASE)
+#define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + PCI_MEM_BASE)
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
 #define pciFindDevice BSP_pciFindDevice
+#define pciConfigOutLong pci_write_config_dword
 #define pciConfigInLong pci_read_config_dword
 #define pciConfigInByte pci_read_config_byte
 
@@ -167,8 +168,7 @@ typedef struct LanceRegs32Rec_ {
 	volatile unsigned long rap;
 	volatile unsigned long reset;
 	volatile unsigned long bdp;
-} LanceRegs32Rec, *LanceRegs32;
-
+} __attribute__ (( aligned(16), packed)) LanceRegs32Rec, *LanceRegs32;
 
 /* RX buffer descriptor
  * Note that the Am79C973 uses this area LITTLE ENDIAN
@@ -178,7 +178,7 @@ typedef struct LanceRegs32Rec_ {
  */
 typedef union RxBufDescU_ {
 	struct {
-		unsigned long	rbadrLE __attribute__ ((aligned(16)));/* buffer address */
+		unsigned long	rbadrLE;/* buffer address */
 		unsigned long	mcntLE;	/* message count and frame tag */
 		unsigned long	statLE; /* status bits */
 		unsigned long	user;	/* user space */
@@ -189,7 +189,7 @@ typedef union RxBufDescU_ {
 		unsigned long	rbadrLE;/* buffer address */
 		unsigned long	user;	/* user space */
 	} style3;
-} RxBufDescU, *RxBufDesc;
+} __attribute__ (( aligned(16),packed )) RxBufDescU, *RxBufDesc;
 
 /* bit definitions for rx buffer descriptors */
 #define RXDESC_MCNT_MASK	((1<<12)-1)	/* mask for the message count */
@@ -219,7 +219,7 @@ typedef union RxBufDescU_ {
  */
 typedef union TxBufDescU_ {
 	struct {
-		unsigned long	tbadrLE __attribute__ ((aligned(16)));/* buffer address */
+		unsigned long	tbadrLE;/* buffer address */
 		unsigned long	csr1LE;	/* status and byte count */
 		unsigned long	csr2LE;	/* status bits */
 		unsigned long	user;	/* user space */
@@ -230,7 +230,7 @@ typedef union TxBufDescU_ {
 		unsigned long	tbadrLE;/* buffer address */
 		unsigned long	user;	/* user space */
 	} style3;
-} TxBufDescU, *TxBufDesc;
+} __attribute__ (( aligned(16),packed )) TxBufDescU, *TxBufDesc;
 
 /* bit definitions for tx buffer descriptors */
 #define TXDESC_CSR1_OWN		(1<<31)		/* descriptor owned by lance */
@@ -256,18 +256,19 @@ typedef union TxBufDescU_ {
 
 typedef struct EtherHeaderRec_ {
 	unsigned char	dst[6];
-	unsigned char	src[2];
+	unsigned char	src[6];
 	unsigned short	len;	/* network byte order */
 	struct	{
 		unsigned char dsap;
 		unsigned char ssap;
 		unsigned char ctrl;
-	} llc8022;
+	} __attribute__ ((packed)) llc8022;
 	struct  {
 		unsigned char org[3];
 		unsigned short type;
-	} snap;
-} EtherHeaderRec, *EtherHeader;
+	} __attribute__ ((packed)) snap;
+} __attribute__ ((packed)) EtherHeaderRec;
+
 
 /* TODO add mutex for driver access */
 typedef struct AmdEthDevRec_ {
@@ -294,10 +295,35 @@ static unsigned char rxbuffer[NumberOf(defDev.rdesc)][2048];
 #define WriteIndReg(value, idx, areg, dreg) __asm__ __volatile__(\
 		"stwbrx %1, 0, %2; stwbrx %0, 0, %3": :"r"(value),"r"(idx),"r"(areg),"r"(dreg))
 #define ReadIndReg(value, idx, areg, dreg) __asm__ __volatile__(\
-		"stwbrx %1, 0, %2; eieio; lwbrx %0, 0, %3":"=r"(value) :"r"(idx),"r"(areg),"r"(dreg))
+		"stwbrx %2, 0, %3; eieio; lwbrx %0, 0, %4":"=r"(value) :"0"(value),"r"(idx),"r"(areg),"r"(dreg))
 
 
 static char *dn="Amd Ethernet:";
+
+void
+amdEthSetSrc(EtherHeader h, AmdEthDev d)
+{
+	memcpy(h->src, (void*)d->baseAddr->aprom, sizeof(h->src));
+}
+
+void
+amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d)
+{
+	/* Only initialize the addresses if they specify a dst/src */
+	if (dst) {
+		memcpy(h->dst,dst,sizeof(h->dst));
+	}
+	if (d)
+		amdEthSetSrc(h,d);
+	h->len=htons(0);
+	h->llc8022.dsap = 0xAA;
+	h->llc8022.ssap = 0xAA;
+	h->llc8022.ctrl = 0x3;
+	h->snap.org[0]  = 0x08; /* Stanford OUI */
+	h->snap.org[1]  = 0x00
+	h->snap.org[2]  = 0x56;
+	h->snap.type    = htons(0x805b); /* stanford V kernel ethernet type */
+}
 
 
 int
@@ -310,7 +336,7 @@ AmdEthDev	d;
 
 
 	/* for now, allow only one instance */
-	assert(instance==1 && !defDev.baseAddr);
+	assert(instance==0 && !defDev.baseAddr);
 	d=&defDev;
 
 	/* scan PCI bus */
@@ -329,6 +355,7 @@ AmdEthDev	d;
 		return AMDETH_ERROR;
 	}
 	d->baseAddr = (LanceRegs32)PCI2LOCAL(tmp);
+
 	pciConfigInByte(bus,dev,fun,PCI_INTERRUPT_LINE,&tmpb);
 	d->irqLine=(unsigned char)tmpb;
 	fprintf(stderr,"%s Lance PCI ethernet found at 0x%08x (IRQ %i),",
@@ -337,12 +364,18 @@ AmdEthDev	d;
 
 	for (i=0; i<6; i++) {
 		fprintf(stderr,"%02x%c",
-				((unsigned char *)d->baseAddr)[i],
+				d->baseAddr->aprom[i],
 				i==5 ? '\n' : ':');
 	}
 
+	/* make sure we have bus master access */
+	pciConfigInLong(bus,dev,fun,PCI_COMMAND,&tmp);
+	tmp|=PCI_COMMAND_MASTER;
+	pciConfigOutLong(bus,dev,fun,PCI_COMMAND,tmp);
+
 	/* switch to 32bit io */
 	d->baseAddr->rdp = 0x0; /* 0 is endian-safe :-) */
+	__asm__ __volatile__("eieio");
 
 	/* initialize BCR regs */
 	{
@@ -385,6 +418,7 @@ AmdEthDev	d;
 		 WCSR(76, ((-(long)NumberOf(d->rdesc)) & 0xffff)); /* RX ring length */
 		 WCSR(49, 0); /* default RX polling interval */
 		/* transmitter ring */
+		 printf("TSILL tdesc is at 0x%08x (PCI 0x%08x)\n",d->tdesc,LOCAL2PCI(d->tdesc));
 		 WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
 		 WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
 		 WCSR(78, ((-(long)NumberOf(d->tdesc)) & 0xffff)); /* TX ring length */
@@ -395,14 +429,9 @@ AmdEthDev	d;
 		int i;
 		/* fill the ethernet header */
 		/* send to broadcast */
+		amdEthHeaderInit(&d->header, 0, d);
+		/* broadcast address */
 		memset(d->header.dst, 0xff, sizeof(d->header.dst));
-		memcpy(d->header.src, (void*)d->baseAddr->aprom, sizeof(d->header.src));
-		d->header.llc8022.dsap = 0xAA;
-		d->header.llc8022.ssap = 0xAA;
-		d->header.llc8022.ctrl = 0x3;
-		d->header.snap.org[2]  = 0xca;
-		d->header.snap.type    = htons(0x805b); /* stanford */
-		wrle(LOCAL2PCI(&d->header),&d->tdesc[0].STYLE.tbadrLE);
 		/* clear ownership flags */
 		for (i=0; i<NumberOf(d->tdesc); i++)
 			wrle(0, &d->tdesc[i].STYLE.csr1LE);
@@ -428,8 +457,12 @@ AmdEthDev	d;
 	return AMDETH_OK;
 }
 
+/* send a packet; if no header is specified, use the default
+ * broadcast header
+ */
+
 int
-amdEthBroadcast(AmdEthDev d,void *data, int size)
+amdEthSendPacket(AmdEthDev d, EtherHeader h, void *data, int size)
 {
 	if (!d) d=&defDev;
 
@@ -437,12 +470,17 @@ amdEthBroadcast(AmdEthDev d,void *data, int size)
 	     rdle(&d->tdesc[1].STYLE.csr1LE) & TXDESC_CSR1_OWN)
 		return AMDETH_BUSY;
 	/* TODO do statistics */
-	d->header.len          = sizeof(d->header) - 14  + size;
+
+	if (!h)
+		h=&d->header;
+	h->len = htons(sizeof(*h) - 14  + size);
 	/* clear csr2 */
 	wrle(0,
 		&d->tdesc[0].STYLE.csr2LE);
 	wrle(0,
 		&d->tdesc[1].STYLE.csr2LE);
+	/* set buffer address of first bd */
+	wrle(LOCAL2PCI(h),&d->tdesc[0].STYLE.tbadrLE);
 	/* set buffer address of second bd */
 	wrle(LOCAL2PCI(data), &d->tdesc[1].STYLE.tbadrLE);
 	/* setup csr1 of second bd */
@@ -451,7 +489,7 @@ amdEthBroadcast(AmdEthDev d,void *data, int size)
 		TXDESC_CSR1_OWN | TXDESC_CSR1_ENP | TXDESC_CSR1_ONES,
 		&d->tdesc[1].STYLE.csr1LE);
 	/* yield 1st descriptor */
-	wrle((-sizeof(d->header) & TXDESC_CSR1_BCNT_MSK) |
+	wrle((-sizeof(*h) & TXDESC_CSR1_BCNT_MSK) |
 		TXDESC_CSR1_OWN | TXDESC_CSR1_STP | TXDESC_CSR1_ONES,
 		&d->tdesc[0].STYLE.csr1LE);
 	__asm__ __volatile__("eieio");
