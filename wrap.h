@@ -200,7 +200,11 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 					sched_get_priority_min(SCHED_FIFO),
 					sched_get_priority_max(SCHED_FIFO));
 #elif defined(__vxworks)
+#if 1
 	np = SCALE_PRIO(prio,255,0);
+#else
+	np = SCALE_PRIO(prio,255,1);	/* reserve 0 for the exec task */
+#endif
 #elif defined(__rtems)
 	char	tmp[4]={0};
 	rtems_name rn;
