@@ -24,8 +24,19 @@ amdEthInit(AmdEthDev *d, int instance, int flags);
  * when in asynchronous TX mode
  */
 #define AMDETH_FLG_AUTO_TX_STATS	(1<<1)
+/* whether to let the ISR automatically update
+ * RX statistics and let the RX overwrite the
+ * same buffer.
+ */
+#define AMDETH_FLG_AUTO_RX			(1<<2)
 /* disable broadcast reception */
 #define AMDETH_FLG_NOBCST			(1<<4)
+
+/* stop and release a device
+ * RETURNS: 0 on success, -1 on error (invalid d pointer)
+ */
+int
+amdEthCloseDev(AmdEthDev d);
 
 /* initialize an ethernet/snap header
  *  - if dst!= 0, fill in the destination address
