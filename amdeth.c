@@ -5,8 +5,13 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include <netinet/in.h>	/* htons */
+
 #include "amdeth.h"
 #include "wrap.h"
+
+#define NUM_ETH_DEVICES 4	/* how many devices our table supports */
+#define RT_DRIVER			/* whether to set some flags for real-time specific application */
 
 #ifdef __rtems__
 #include <rtems.h>
@@ -14,7 +19,9 @@
 #include <bsp/pci.h>
 #include <bsp/irq.h>
 #include <libcpu/io.h>
-#include "bspExt.h"
+#include "bsp/bspExt.h"
+typedef unsigned int  pci_ulong;
+typedef unsigned char pci_ubyte;
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + PCI_MEM_BASE)
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
 #define pciFindDevice BSP_pciFindDevice
@@ -24,6 +31,8 @@
 
 #elif defined(__vxworks)
 #include <vxWorks.h>
+typedef unsigned long pci_ulong;
+typedef unsigned char pci_ubyte;
 //#define PCI_VENDOR_ID_AMD	0x1022
 //#define PCI_DEVICE_ID_AMD_LANCE	0x2000
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr))
@@ -32,7 +41,7 @@
 #endif
 
 #ifdef CPU_BIG_ENDIAN
-#ifdef __PPC
+#if defined(__PPC) || defined(__PPC__)
 static inline void wrle(unsigned long w, void *addr)
 {
 	__asm__ __volatile__("stwbrx %0, 0, %1"::"r"(w),"r"(addr));
@@ -280,13 +289,15 @@ typedef struct EtherHeaderRec_ {
 
 /* TODO add mutex for driver access */
 typedef struct AmdEthDevRec_ {
-	rtems_irq_connect_data brokenbydesign;
+	rtems_irq_connect_data	brokenbydesign;
+	struct AmdEthDevRec_	*next;			/* devices sharing a common interrupt */
 	LanceRegs32	baseAddr;
-	int		irqLine;
+	int			irqLine;
 	RxBufDescU	rdesc[1];	/* one dummy descriptor */
 	TxBufDescU	tdesc[2];	/* two descriptors; one for the header, one for the data */
 	EtherHeaderRec	header;
 	PSemaId		sync;
+	int			flags;
 	struct		{
 		unsigned long	txPackets;	/* # packets sent */
 		unsigned long	rxPackets;	/* # packets received */
@@ -312,6 +323,11 @@ typedef struct AmdEthDevRec_ {
 	}		stats;
 } AmdEthDevRec;
 
+static int amdEthBogusIrqs = 0;
+
+/*TSILL*/
+unsigned long roundtrip;
+
 /* Some setup bits */
 #ifdef RT_DRIVER
 #define TXDESC_ERRS	(TXDESC_CSR1_DEF | TXDESC_CSR1_ERR)
@@ -330,7 +346,7 @@ typedef struct AmdEthDevRec_ {
 #endif
 
 #define CSR0_SETUP	(0)
-#define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_RINTM)) | CSR3_DXSUFLO)
+#define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_TINTM | CSR3_RINTM)) | CSR3_DXSUFLO)
 #define CSR4_SETUP	((CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) | CSR4_RTFLAGS)
 #define CSR5_SETUP	(CSR5_TOKINTD)
 #define CSR7_SETUP	(CSR7_RTFLAGS)
@@ -340,11 +356,38 @@ static int  amdEthIntIsOn();
 static void amdEthIntEnable();
 static void amdEthIntDisable();
 static void amdEthIsr();
+int amdEthUpdateTxStats(AmdEthDev d, int i);
+static unsigned long long read_counter(AmdEthDev d, int csr, volatile unsigned long *pHi);
 
-static AmdEthDevRec defDev={{0},0};
+static AmdEthDevRec devices[NUM_ETH_DEVICES]={{{0},0},};
+
+/* Because we cannot pass an argument to the ISR, we must
+ * work and hack :-(
+ */
+
+typedef struct InsaneApiMapRec_ {
+	void		(*isr)(void);
+	AmdEthDev	device;
+} InsaneApiMapRec, InsaneApiMap;
+
+static void isrA();
+static void isrB();
+static void isrC();
+static void isrD();
+
+/* A table to map (CPU/board/system dependent) interrupt lines to wrappers */
+static InsaneApiMapRec insaneApiMap[4] = {{isrA,0},{isrB,0},{isrC,0},{isrD,0}};
+
+/* Need a wrapper for each of the 4 PCI interrupts;
+ * several devices could share one of them
+ */
+static void isrA() { amdEthIsr(insaneApiMap[0].device); }
+static void isrB() { amdEthIsr(insaneApiMap[1].device); }
+static void isrC() { amdEthIsr(insaneApiMap[2].device); }
+static void isrD() { amdEthIsr(insaneApiMap[3].device); }
 
 #ifdef RXTEST
-static unsigned char rxbuffer[NumberOf(defDev.rdesc)][2048];
+static unsigned char rxbuffer[NumberOf(devices[0].rdesc)][2048];
 #endif
 
 /* read and write a data / bus registers in the lance.  */
@@ -386,6 +429,21 @@ ReadIndReg(
 
 static char *dn="Amd Ethernet:";
 
+static void
+amdEthPrintAddr(AmdEthDev d, FILE *f, char *header)
+{
+int i;
+
+	if (header)
+		fprintf(f,header);
+
+	for (i=0; i<6; i++) {
+		fprintf(f,"%02x", d->baseAddr->aprom[i]);
+		if ( i < 5)
+			fputc(':',f);
+	}
+}
+
 void
 amdEthSetSrc(EtherHeader h, AmdEthDev d)
 {
@@ -413,113 +471,175 @@ amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d)
 
 
 static void
-amdEthIsr(void)
+amdEthIsr(AmdEthDev	d)
 {
-AmdEthDev	d=&defDev;
 register volatile unsigned long *rap, *rdp;
 register unsigned long	tmp;
-unsigned long		savedAR;
+unsigned long			savedAR;
+int						bogusIrq = 1;
 
-	/* save the rap before changing it (don't care about endianness) */
-	savedAR = d->baseAddr->rap;
-	
-	rap = &d->baseAddr->rap;
-	rdp = &d->baseAddr->rdp;
+	for ( ; d; d=d->next ) {
 
-	if ( ((tmp=RCSR(0)) & CSR0_INTR) ) {
-		/* to check: EXDINT, IDON, MERR, MISS, MFCO, RCVCCO, RINT,
-		 * done (lowercase - x: unused):
-		 *                x   x    merr  miss  mfco  rcvcco  rint
-		 * register:
-		 *             csr5  csr0  csr0  csr0   csr4   csr4  csr0 
-		 *           SINT, TINT, TXSTRT, UINT, STINT, MREINT, MCCINT,
-		 *           sint     x       x     x      x       x       x
-		 *           csr5  csr0    csr4  csr4   csr7   csr7   csr7 
-		 *           MIIPDTINT, MAPINT, MCCIINT, MPINT
-		 *                   x       x       x     x
-		 *                 csr7    csr7    csr7  csr5
-		 */
-		d->stats.irqs++;
-#if 0
-		if ( tmp & CSR0_MISS ) {
-			/* missed frame - we use the hardware counter but action
-			 * could be taken here also, maybe post a special event...
+		/* save the rap before changing it (don't care about endianness) */
+		savedAR = d->baseAddr->rap;
+
+		rap = &d->baseAddr->rap;
+		rdp = &d->baseAddr->rdp;
+
+		if ( ((tmp=RCSR(0)) & CSR0_INTR) ) {
+			/* to check: EXDINT, IDON, MERR, MISS, MFCO, RCVCCO, RINT,
+			 * done (lowercase - x: unused):
+			 *                x   x    merr  miss  mfco  rcvcco  rint
+			 * register:
+			 *             csr5  csr0  csr0  csr0   csr4   csr4  csr0 
+			 *           SINT, TINT, TXSTRT, UINT, STINT, MREINT, MCCINT,
+			 *           sint     x       x     x      x       x       x
+			 *           csr5  csr0    csr4  csr4   csr7   csr7   csr7 
+			 *           MIIPDTINT, MAPINT, MCCIINT, MPINT
+			 *                   x       x       x     x
+			 *                 csr7    csr7    csr7  csr5
 			 */
-		}
+			d->stats.irqs++;
+			bogusIrq = 0;
+#if 0
+			if ( tmp & CSR0_MISS ) {
+				/* missed frame - we use the hardware counter but action
+				 * could be taken here also, maybe post a special event...
+				 */
+			}
 #endif
-		if ( tmp & CSR0_MERR ) {
-			/* memory / PCI bus error */
-			d->stats.rxMemory++;
-		}
-#ifndef RT_DRIVER
-		if ( tmp & CSR0_TINT ) {
-			/* TS interrupt not used */
-		}
-#endif
-#if 0	/* We post to the receiver in any case the controller has
-	 * released the descriptor.
-	 */
-		if ( tmp & CSR0_RINT ) {
-			/* received a packet, post an event */
-		}
-#endif
-		/* clear raised flags */
-		WCSR(0,tmp);
+			if ( tmp & CSR0_MERR ) {
+				/* memory / PCI bus error */
+				d->stats.rxMemory++;
+			}
+			if ( tmp & CSR0_TINT ) {
+				/* TS interrupt not used */
+				if (AMDETH_FLG_AUTO_TX_STATS & d->flags) {
+					int i;
+					for ( i = 0; i < NumberOf(d->tdesc); i++)
+						amdEthUpdateTxStats(d,i);
 
-		/* handle user and the counter rollover interrupts */
-		tmp=RCSR(4);
-		if (tmp & CSR4_MFCO)
-			d->stats.rxOverrunHi++;
-		if (tmp & CSR4_RCVCCO)
-			d->stats.rxCollisionHi++;
-		/* clear raised flags */
-		WCSR(4,tmp);
+				}
+			}
+#if 0	
+		/* We post to the receiver in any case the controller has
+		 * released the descriptor. (NO)
+		 */
+#endif
+			if ( tmp & CSR0_RINT ) {
+				/* received a packet, post an event */
+				if ( ! (rdle(&d->rdesc[0].STYLE.statLE) & RXDESC_STAT_OWN) ) {
+					/* TSILL */
+					unsigned long now;
+					__asm__ __volatile__("mftb %0":"=r"(now));
+					roundtrip = now-roundtrip;
+					pSemPost(&d->sync);
+				}
+			}
+			/* clear raised flags */
+	 		WCSR(0,tmp);
 
-		tmp=RCSR(5);
-		if (tmp & CSR5_SINT) {
-			/* this is probably really bad */
-			d->stats.sysError++;
-			/* TODO we should do something here */
+			/* handle user and the counter rollover interrupts */
+			tmp=RCSR(4);
+			if (tmp & CSR4_MFCO)
+				d->stats.rxOverrunHi++;
+			if (tmp & CSR4_RCVCCO)
+				d->stats.rxCollisionHi++;
+			/* clear raised flags */
+			WCSR(4,tmp);
+
+			tmp=RCSR(5);
+			if (tmp & CSR5_SINT) {
+				/* this is probably really bad */
+				d->stats.sysError++;
+				/* TODO we should do something here */
+			}
+			WCSR(5,tmp);
+
 		}
-		WCSR(5,tmp);
+
+		/* restore address register contents */
+		d->baseAddr->rap=savedAR;
+
 	}
-
-	/* restore address register contents */
-	d->baseAddr->rap=savedAR;
-
-	if ( ! (rdle(&d->rdesc[0].STYLE.statLE) & RXDESC_STAT_OWN) )
-		pSemPost(&d->sync);
+	amdEthBogusIrqs += bogusIrq;
 }
 
 static int
 amdEthIntIsOn(const rtems_irq_connect_data *arg)
 {
-AmdEthDev d=(AmdEthDev)arg;
-register volatile unsigned long *rap = &d->baseAddr->rap;
-register volatile unsigned long *rdp = &d->baseAddr->rdp;
-	return	(RCSR(0) & CSR0_IENA) || (RCSR(5) & CSR5_SINTE);
+int			i;
+AmdEthDev	d;
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	for (i = 0; i < NumberOf(insaneApiMap); i++) {
+		if ( (d = insaneApiMap[i].device) &&
+			  d->brokenbydesign.name == arg->name) {
+			rap = &d->baseAddr->rap;
+			rdp = &d->baseAddr->rdp;
+			return	(RCSR(0) & CSR0_IENA) || (RCSR(5) & CSR5_SINTE);
+		}
+	}
+	return 0;
+}
+
+static inline void
+intEnable(AmdEthDev d)
+{
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	rap = &d->baseAddr->rap;
+	rdp = &d->baseAddr->rdp;
+	WCSR( 0, RCSR(0) | CSR0_IENA);
+	WCSR( 5, RCSR(5) | CSR5_SINTE);
 }
 
 static void
 amdEthIntEnable(const rtems_irq_connect_data *arg)
 {
-AmdEthDev d=(AmdEthDev)arg;
-register volatile unsigned long *rap = &d->baseAddr->rap;
-register volatile unsigned long *rdp = &d->baseAddr->rdp;
-	WCSR( 0, CSR0_SETUP | CSR0_IENA);
-	WCSR( 5, CSR5_SETUP | CSR5_SINTE);
+int			i;
+AmdEthDev	d;
+
+	for (i = 0; i < NumberOf(insaneApiMap); i++) {
+		if ( (d = insaneApiMap[i].device) &&
+			  d->brokenbydesign.name == arg->name) {
+			do {
+				intEnable(d);
+				d = d->next;
+			} while (d);
+			return;
+		}
+	}
+}
+
+static inline void
+intDisable(AmdEthDev d)
+{
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	rap = &d->baseAddr->rap;
+	rdp = &d->baseAddr->rdp;
+	WCSR( 0, RCSR(0) & ~CSR0_IENA);
+	WCSR( 5, RCSR(0) & ~CSR5_SINTE);
 }
 
 static void
 amdEthIntDisable(const rtems_irq_connect_data *arg)
 {
-AmdEthDev d=(AmdEthDev)arg;
-register volatile unsigned long *rap = &d->baseAddr->rap;
-register volatile unsigned long *rdp = &d->baseAddr->rdp;
-	WCSR( 0, CSR0_SETUP);
-	WCSR( 5, CSR5_SETUP);
-}
+int			i;
+AmdEthDev	d;
 
+	for (i = 0; i < NumberOf(insaneApiMap); i++) {
+		if ( (d = insaneApiMap[i].device) &&
+			  d->brokenbydesign.name == arg->name) {
+			do {
+				intDisable(d);
+				d = d->next;
+			} while (d);
+			return;
+		}
+	}
+}
 
 int
 amdEthReceivePacket(AmdEthDev d, char *buf, int len)
@@ -532,7 +652,7 @@ register unsigned long rxstat;
 	 * before yielding the descriptor
 	 */
 	__asm__ __volatile__("eieio");
-	wrle(RXDESC_STAT_OWN | RXDESC_STAT_ONES | (-sizeof(len) & RXDESC_STAT_BCNT_MSK),
+	wrle(RXDESC_STAT_OWN | RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK),
 	     &d->rdesc[0].STYLE.statLE);
 	/* yield the descriptor before enforcing a poll */
 	__asm__ __volatile__("eieio");
@@ -572,7 +692,7 @@ register unsigned long rxstat;
 	}
 	d->stats.rxPackets++;
 	/* get the real length */
-	return (-(int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
+	return ((int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
 }
 
 int
@@ -584,8 +704,13 @@ pci_ubyte	tmpb;
 AmdEthDev	d;
 
 	/* for now, allow only one instance */
-	assert(instance==0 && !defDev.baseAddr);
-	d=&defDev;
+	assert(instance < NumberOf(devices));
+	d=&devices[instance];
+			
+	if (devices[instance].baseAddr) {
+		fprintf(stderr,"AmdEth #%i already initialized\n",instance);
+		return AMDETH_ERROR;
+	}
 
 	memset(d, 0, sizeof(*d));
 
@@ -606,17 +731,14 @@ AmdEthDev	d;
 	}
 	d->baseAddr = (LanceRegs32)PCI2LOCAL(tmp);
 
+	d->flags    = flags;
+
 	pciConfigInByte(bus,dev,fun,PCI_INTERRUPT_LINE,&tmpb);
 	d->irqLine=(unsigned char)tmpb;
 	fprintf(stderr,"%s Lance PCI ethernet found at 0x%08x (IRQ %i),",
 			dn, (unsigned int)d->baseAddr, d->irqLine);
-	fprintf(stderr," hardware address: ");
-
-	for (i=0; i<6; i++) {
-		fprintf(stderr,"%02x%c",
-				d->baseAddr->aprom[i],
-				i==5 ? '\n' : ':');
-	}
+	amdEthPrintAddr(d, stderr, " hardware address: ");
+	fputc('\n',stderr);
 
 	/* make sure we have bus master access */
 	pciConfigInLong(bus,dev,fun,PCI_COMMAND,&tmp);
@@ -626,15 +748,6 @@ AmdEthDev	d;
 	/* switch to 32bit io */
 	d->baseAddr->rdp = 0x0; /* 0 is endian-safe :-) */
 	__asm__ __volatile__("eieio");
-
-	/* install ISR */
-	d->brokenbydesign.on=amdEthIntEnable;
-	d->brokenbydesign.off=amdEthIntDisable;
-	d->brokenbydesign.isOn=amdEthIntIsOn;
-	d->brokenbydesign.hdl=amdEthIsr;
-	d->brokenbydesign.name=BSP_PCI_IRQ0 + d->irqLine;
-
-	assert(BSP_install_rtems_irq_handler(&d->brokenbydesign));
 
 	/* initialize BCR regs */
 	{
@@ -667,7 +780,10 @@ AmdEthDev	d;
 		WCSR(7,  CSR7_SETUP | CSR7_IRQ_STAT);
 
 		/* switch off receiver ? */
-		WCSR(15, CSR15_SETUP | (flags & AMDETH_FLG_USE_RX ? 0 : CSR15_DRX));
+		WCSR(15, CSR15_SETUP
+					| (flags & AMDETH_FLG_USE_RX ? 0 : CSR15_DRX)
+					| (flags & AMDETH_FLG_NOBCST ? CSR15_DRCVBC : 0)
+			);
 
 		/* clear logical address filters */
 		WCSR(8, 0);
@@ -709,12 +825,53 @@ AmdEthDev	d;
 			     (-sizeof(rxbuffer[0]) & RXDESC_STAT_BCNT_MSK),
 			     &d->rdesc[i].STYLE.statLE);
 		}
+#else
+		for (i=0; i<NumberOf(d->rdesc); i++) {
+			wrle(0, &d->rdesc[i].STYLE.statLE);
+		}
 #endif
 	}
 
 		WCSR(0, CSR0_SETUP | CSR0_STRT);
 	}
-	pSemCreate( 1/* binary */, 0 /* empty */, &d->sync);
+
+	/* RTEMS binary semaphores allow nesting and are not
+	 *       suited for task synchronization
+	 */
+	if (AMDETH_FLG_USE_RX & flags) 
+		pSemCreate( 0/* binary */, 0 /* empty */, &d->sync);
+
+	/* install ISR */
+
+	d->brokenbydesign.on=amdEthIntEnable;
+	d->brokenbydesign.off=amdEthIntDisable;
+	d->brokenbydesign.isOn=amdEthIntIsOn;
+	d->brokenbydesign.name=BSP_PCI_IRQ0 + d->irqLine;
+
+	/* is an ISR for our line already installed ? */
+	for (i = NumberOf(insaneApiMap) - 1; i >=0; i-- ) {
+		AmdEthDev	d1;
+		if ( (d1 = insaneApiMap[i].device) &&
+			  d1->brokenbydesign.name == d->brokenbydesign.name) {
+			/* link into existing entry */
+			d->next = d1;
+			insaneApiMap[i].device = d;
+			d->brokenbydesign.hdl  = insaneApiMap[i].isr;
+			intEnable(d);
+			break;
+		}
+	}
+	if ( i < 0 ) {
+		/* create a new entry */
+		for (i = NumberOf(insaneApiMap) - 1; i >=0 && insaneApiMap[i].device; i-- )
+			/* do nothing else */;
+		assert ( i >= 0 );
+		insaneApiMap[i].device  = d;
+		d->brokenbydesign.hdl   = insaneApiMap[i].isr;
+		assert(BSP_install_rtems_irq_handler(&d->brokenbydesign));
+	}
+
+
 	if (pd) *pd=d;
 
 	return AMDETH_OK;
@@ -735,7 +892,7 @@ unsigned long	csr1,csr2;
 	if ( (csr1 & TXDESC_CSR1_OWN) )
 		return AMDETH_BUSY;
 
-	if ( ! (csr1 & TXDESC_CSR1_ERR) )
+	if ( ! (csr1 & TXDESC_ERRS) )
 		return 0;
 	/* update statistics */
 #ifdef RT_DRIVER
@@ -769,7 +926,7 @@ int
 amdEthSendPacket(AmdEthDev d, EtherHeader h, void *data, int size)
 {
 register unsigned long csr1OR;
-	if (!d) d=&defDev;
+	if (!d) d=&devices[0];
 
 	csr1OR=rdle(&d->tdesc[0].STYLE.csr1LE) | rdle(&d->tdesc[1].STYLE.csr1LE);
 	if ( csr1OR & TXDESC_CSR1_OWN )
@@ -807,40 +964,99 @@ register unsigned long csr1OR;
 		&d->tdesc[0].STYLE.csr1LE);
 	__asm__ __volatile__("eieio");
 	{
+	/* TSILL */
+	unsigned long flags;
 	/* demand transmission without changing status bits - we
 	 * hope nobody (ISR or other thread) modifies the IENA flag while we are
 	 * tampering with this register...
 	 */
 	register volatile unsigned long *rap = &d->baseAddr->rap;
 	register volatile unsigned long *rdp = &d->baseAddr->rdp;
+	rtems_interrupt_disable(flags);
 	WCSR(0, (RCSR(0) & ~(CSR0_IRQ_STAT)) | CSR0_TDMD);
+	__asm__ __volatile__("mftb %0":"=r"(roundtrip));
+	rtems_interrupt_enable(flags);
 	}
 	return AMDETH_OK;
 }
+
+int
+amdEthDumpStats(AmdEthDev d, FILE *f)
+{
+int	inc;
+
+	if ( !f )
+		f = stdout;
+
+	if ( !d ) {
+		d   = devices;
+		inc = 1;
+	} else {
+		/* assert termination after dumping THE devices stats */
+		inc = NumberOf(devices);
+	}
+
+	for ( ; d < devices + NumberOf(devices); d+=inc ) {
+
+		if ( !d->baseAddr )
+			continue;
+
+		fprintf(f,"AMD Eth Interface #%i (", d - devices);
+		amdEthPrintAddr(d, f, 0);
+		fprintf(f,") statistics:\n");
+		fprintf(f,"  # packets sent: %li\n",     d->stats.txPackets);
+		fprintf(f,"  # pkt. received:%li\n",  d->stats.rxPackets);
+		fprintf(f,"  # interrupts:   %li\n",     d->stats.irqs);
+		fprintf(f,"TX Errors:\n");
+		/* all below here are error counts */
+#ifdef RT_DRIVER
+		fprintf(f,"  deferred TX:    %li\n",     d->stats.txDeferred);	/* deferrals are errors */
+#endif
+		fprintf(f,"  fifo underflow: %li\n",    d->stats.txFifoUnderflow);
+		fprintf(f,"  late collision: %li\n",    d->stats.txLateCollision);
+		fprintf(f,"  carrier loss:   %li\n",    d->stats.txCarrierLoss);
+		fprintf(f,"  retries:        %li\n",    d->stats.txRetry);
+		fprintf(f,"  bus parity err.:%li\n",    d->stats.txBusParity);
+
+		fprintf(f,"RX Errors:\n");
+		fprintf(f,"  RX Memory err.: %li\n",    d->stats.rxMemory);
+		fprintf(f,"  fifo overflow:  %li\n",    d->stats.rxFifoOverflow);
+		fprintf(f,"  framing err.:   %li\n",    d->stats.rxFraming);
+		fprintf(f,"  CRC err.:       %li\n",    d->stats.rxCrc);
+		fprintf(f,"  bus parity err.:%li\n",    d->stats.rxBusParity);
+		fprintf(f,"  missed frames:  %lli\n",   read_counter(d, 112, &d->stats.rxOverrunHi));
+		fprintf(f,"  collision Hi:   %lli\n",   read_counter(d, 114, &d->stats.rxCollisionHi));
+		fprintf(f,"  system err.:    %li\n",    d->stats.sysError);
+	}
+
+	fprintf(f,"%i bogus IRQs detected\n",       amdEthBogusIrqs);
+	return 0;
+}
+
 
 /* routines for debugging / testing */
 unsigned long
 lance_read_csr(int offset)
 {
-	return ReadIndReg(offset,&defDev.baseAddr->rap,&defDev.baseAddr->rdp);
+	return ReadIndReg(offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->rdp);
 
 }
 void
 lance_write_csr(unsigned long val, int offset)
 {
-	WriteIndReg(val,offset,&defDev.baseAddr->rap,&defDev.baseAddr->rdp);
+	WriteIndReg(val,offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->rdp);
 }
 
 unsigned long
 lance_read_bcr(int offset)
 {
-	return ReadIndReg(offset,&defDev.baseAddr->rap,&defDev.baseAddr->bdp);
+	return ReadIndReg(offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->bdp);
 
 }
 void
 lance_write_bcr(unsigned long val, int offset)
 {
-	WriteIndReg(val,offset,&defDev.baseAddr->rap,&defDev.baseAddr->bdp);
+	WriteIndReg(val,offset,&devices[0].baseAddr->rap,&devices[0].baseAddr->bdp);
 }
 
 /* how to read a two-word counter without disabling interrupts
@@ -883,11 +1099,11 @@ lance_write_bcr(unsigned long val, int offset)
  *
  *     lo_1 = hw_count;
  *       / * rollover could occur here (A) * /
- *     hi   = hi_counter;
+ *     hi   = hi_count;
  *       / * or rollover could occur here (B) * /
  *     lo_2 = hw_count;
  *
- *     if ( lo_2 > lo_1 ) {
+ *     if ( lo_2 >= lo_1 ) {
  *       / * no overflow between lo_2 and lo_1 assignments * /
  *     } else {
  *       / * overflow; however, we don't know
@@ -905,3 +1121,55 @@ lance_write_bcr(unsigned long val, int offset)
  * }
  *
  */
+
+/* a simplified version who assumes the ISR always runs prior
+ * to testing hw_ovfl
+ */
+
+static unsigned long long
+read_counter(AmdEthDev d, int csr_no, volatile unsigned long *pHi)
+{
+unsigned short lo_1, lo_2;
+unsigned long  hi;
+register volatile unsigned long *rap = &d->baseAddr->rap;
+register volatile unsigned long *rdp = &d->baseAddr->rdp;
+
+		lo_1 = RCSR(csr_no);
+		hi   = *pHi;
+		lo_2 = RCSR(csr_no);
+
+		if (lo_2 < lo_1) {
+			/* overflow has just occurred; re-read Hi */
+			hi = *pHi;
+		}
+		return (hi<<16)|lo_2;
+}
+
+static int
+_cexpModuleFinalize(void *mod)
+{
+int		 	i;
+AmdEthDev	d;
+register volatile unsigned long *rap;
+register volatile unsigned long *rdp;
+	
+	for ( i=0; i < NumberOf(insaneApiMap); i++) {
+		for ( d=insaneApiMap[i].device; d; d=d->next) {
+			rap = &d->baseAddr->rap;
+			rdp = &d->baseAddr->rdp;
+			/* STOP DMA */
+			WCSR( 0, CSR0_SETUP | CSR0_STOP);
+			/* disable interrupts */
+			intDisable(d);
+			if (d->sync) {
+				/* release sema */
+				pSemPost(&d->sync);
+				/* delete sema  */
+				pSemDestroy(&d->sync);
+			}
+		}
+		/* uninstall ISR */
+		BSP_remove_rtems_irq_handler(&insaneApiMap[i].device->brokenbydesign);
+	}
+	return 0;
+}
