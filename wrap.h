@@ -104,7 +104,7 @@ pSemCreate(int binary, unsigned long init_count, PSemaId *ppsem)
 	return RTEMS_SUCCESSFUL!=rtems_semaphore_create(
 			sname++,
 			init_count,
-			(binary ? RTEMS_BINARY_SEMAPHORE : RTEMS_COUNTING_SEMAPHORE)
+			(binary ? RTEMS_BINARY_SEMAPHORE | RTEMS_INHERIT_PRIORITY : RTEMS_COUNTING_SEMAPHORE)
 				| RTEMS_FIFO,
 			0,
 			ppsem);
