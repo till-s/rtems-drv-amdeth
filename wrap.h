@@ -145,7 +145,11 @@ typedef void * (*Task_T)(void*);
  */
 
 
-#define SCALE_PRIO(pri,min,max) (((max)*(255-(pri))+(min)*(pri))/255)
+#define UNSCALE_PRIO(pri,min,max) (((max)*(255-(pri))+(min)*(pri))/255)
+/* This is not guaranteed to be the exact inverse for all values of min/max !
+ * It should be for min/max of 255/0, 255/1, though.
+ */
+#define SCALE_PRIO(pri,min,max)	(((max)-(pri))*255/((max)-(min)))
 
 #ifdef USE_PTHREAD
 
@@ -161,6 +165,13 @@ typedef void*		PTaskArg;
 
 #define PTASK_DECL(entry_point,arg) void* entry_point(PTaskArg arg)
 #define PTASK_LEAVE                 do { return 0; } while (0)
+#define SCALED2NATIVE(prio)	UNSCALE_PRIO((prio), \
+									sched_get_priority_min(SCHED_FIFO), \
+									sched_get_priority_max(SCHED_FIFO))
+/* This is not guaranteed to be the exact inverse for all values of min/max ! */
+#define NATIVE2SCALED(prio) SCALE_PRIO((prio),   \
+									sched_get_priority_min(SCHED_FIFO), \
+									sched_get_priority_max(SCHED_FIFO))
 
 #elif defined (__vxworks)
 
@@ -175,6 +186,14 @@ typedef int		PTaskArg;
 
 #define PTASK_LEAVE                 do { return 0; } while (0)
 
+#if 1
+#define SCALED2NATIVE(prio)	UNSCALE_PRIO((prio),255,0)
+#define NATIVE2SCALED(prio)	SCALE_PRIO((prio),255,0)
+#else
+#define SCALED2NATIVE(prio)	UNSCALE_PRIO((prio),255,1) /* reserve 0 for the exec task */
+#define NATIVE2SCALED(prio)	SCALE_PRIO((prio),255,0)
+#endif
+
 #elif defined(__rtems__)
 #include <string.h>
 typedef rtems_id	PTaskId;
@@ -184,6 +203,9 @@ typedef rtems_task_argument PTaskArg;
 #define PTASK_DECL(entry_point,arg) rtems_task entry_point(PTaskArg arg)
 /* TODO: I believe the RTEMS native task should delete itself when leaving */
 #define PTASK_LEAVE                 do { rtems_task_delete(RTEMS_SELF); } while (0)
+
+#define SCALED2NATIVE(prio)		UNSCALE_PRIO((prio),255,1)
+#define NATIVE2SCALED(prio)		SCALE_PRIO((prio),255,1)
 
 #endif
 
@@ -197,21 +219,15 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 #ifdef USE_PTHREAD
 	pthread_attr_t 		attr;
 	struct sched_param	schedparam;
-
-	schedparam.sched_priority=np=SCALE_PRIO(prio,
-					sched_get_priority_min(SCHED_FIFO),
-					sched_get_priority_max(SCHED_FIFO));
-#elif defined(__vxworks)
-#if 1
-	np = SCALE_PRIO(prio,255,0);
-#else
-	np = SCALE_PRIO(prio,255,1);	/* reserve 0 for the exec task */
-#endif
 #elif defined(__rtems__)
-	char	tmp[4]={0};
-	rtems_name rn;
-	np = SCALE_PRIO(prio,255,1);
+	char				tmp[4]={0};
+	rtems_name			rn;
 #endif
+
+#ifdef USE_PTHREAD
+	schedparam.sched_priority=
+#endif
+	np = SCALED2NATIVE(prio);
 
 #ifdef DEBUG
 	MY_PRINTF("spawning task at prio %i\n",np);
