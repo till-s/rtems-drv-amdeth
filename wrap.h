@@ -17,7 +17,7 @@
 
 #if defined(__vxworks)
 #include <vxWorks.h>
-#elif defined(__rtems)
+#elif defined(__rtems__)
 #include <rtems.h>
 #elif defined(__linux__)
 #ifndef USE_PTHREAD
@@ -92,7 +92,7 @@ pSemWait(PSemaId *ppsem)
 	return OK!=semTake(*ppsem,WAIT_FOREVER);
 }
 
-#elif defined(__rtems)
+#elif defined(__rtems__)
 /* rtems native semaphores */
 typedef rtems_id	PSemaId;
 
@@ -175,7 +175,7 @@ typedef int		PTaskArg;
 
 #define PTASK_LEAVE                 do { return 0; } while (0)
 
-#elif defined(__rtems)
+#elif defined(__rtems__)
 #include <string.h>
 typedef rtems_id	PTaskId;
 
@@ -207,13 +207,15 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 #else
 	np = SCALE_PRIO(prio,255,1);	/* reserve 0 for the exec task */
 #endif
-#elif defined(__rtems)
+#elif defined(__rtems__)
 	char	tmp[4]={0};
 	rtems_name rn;
 	np = SCALE_PRIO(prio,255,1);
 #endif
 
+#ifdef DEBUG
 	MY_PRINTF("spawning task at prio %i\n",np);
+#endif
 
 #ifdef USE_PTHREAD
 	if (pthread_attr_init(&attr) ||
@@ -246,7 +248,7 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 			arg,0,0,0,0,0,0,0,0,0))) {
 		goto errout;
 	}
-#elif defined(__rtems)
+#elif defined(__rtems__)
 	strncpy(tmp,name,4);
 	rn=rtems_build_name(tmp[0],tmp[1],tmp[2],tmp[3]);
 	if (stacksize<RTEMS_MINIMUM_STACK_SIZE)
@@ -266,6 +268,9 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 
 #else
 #error "I don't know how to spawn a task on this OS"
+#endif
+#ifdef DEBUG
+	MY_PRINTF("Got ID 0x%08x\n",*ptask);
 #endif
 	return 0;
 errout:

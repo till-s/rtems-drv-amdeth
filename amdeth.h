@@ -2,7 +2,7 @@
 #ifndef TILL_AMD_ETHER_DRIVER_H
 #define TILL_AMD_ETHER_DRIVER_H
 
-#ifdef __rtems
+#ifdef __rtems__
 #include <rtems.h>
 #include <bsp/pci.h>
 #include <libcpu/io.h>

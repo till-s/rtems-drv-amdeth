@@ -8,7 +8,7 @@
 #include "amdeth.h"
 #include "wrap.h"
 
-#ifdef __rtems
+#ifdef __rtems__
 #include <rtems.h>
 #include <bsp.h>
 #include <bsp/pci.h>
