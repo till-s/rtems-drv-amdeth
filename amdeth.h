@@ -47,7 +47,6 @@ amdEthInit(AmdEthDev *d, int instance, int flags);
 /* synchronous mode; amdEthReceivePacket() blocks for a new packet */
 #define AMDETH_FLG_RX_MODE_SYNC		(3<<4)
 
-
 /* disable broadcast reception */
 #define AMDETH_FLG_NOBCST			(1<<8)
 
@@ -56,6 +55,9 @@ amdEthInit(AmdEthDev *d, int instance, int flags);
  * settings need to be different and hence YOU tell ME
  */
 #define AMDETH_FLG_FIBER			(1<<9)
+
+/* allow retries / collisions when sending */
+#define AMDETH_FLG_DO_RETRY			(3<<8)
 
 /* stop and release a device
  * RETURNS: 0 on success, -1 on error (invalid d pointer)
@@ -83,6 +85,9 @@ amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d);
 int
 amdEthSendPacket(AmdEthDev d, EtherHeader header, void *payload, int size);
 	
+/* update tx statistics from buffer descriptors; pass i==-1 */
+int amdEthUpdateTxStats(AmdEthDev d, unsigned i);
+
 #define amdEthBroadcast(dev, payload, size) amdEthSendPacket((dev),0,(payload),(size))
 
 int

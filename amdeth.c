@@ -5,13 +5,11 @@
 /* THREAD SAFETY NOTE
  * ==================
  *
- * This driver is NOT thread safe. Any access to the device
- * involves setting a 'address' register followed by reading/writing
- * a 'data' register (indirect register access), a sequence which
- * is not atomic.
- * For sake of performance, no locking scheme is implemented, hence
- * it is left to the user to make sure multiple threads are not
- * accessing the same device.
+ * Any access to the device involves setting a 'address' register
+ * followed by reading/writing a 'data' register (indirect register access),
+ * a sequence which is not atomic.
+ * Hence, all access to the device (including *read* access) must
+ * be protected by using the REG_LOCK()/REG_UNLOCK() macros.
  * The ISR which also performes register access *does* save/restore
  * the 'address' register setting across interrupts.
  */
@@ -351,6 +349,9 @@ typedef struct EtherHeaderRec_ {
 	} __attribute__ ((packed)) snap;
 } __attribute__ ((packed)) EtherHeaderRec;
 
+#define REGLOCK(d)   pSemWait(&(d)->mutex)
+#define REGUNLOCK(d) pSemPost(&(d)->mutex)
+
 
 /* TODO add mutex for driver access */
 typedef struct AmdEthDevRec_ {
@@ -364,6 +365,7 @@ typedef struct AmdEthDevRec_ {
 	TxBufDescU	tdesc[2];	/* two descriptors; one for the header, one for the data */
 	EtherHeaderRec	theader;
 	PSemaId		sync;
+	PSemaId		mutex;
 	int			flags;
 	unsigned	rmode, tmode;
 	struct		{
@@ -393,8 +395,6 @@ typedef struct AmdEthDevRec_ {
 	}		stats;
 } AmdEthDevRec;
 
-static int amdEthBogusIrqs = 0;
-
 /*TSILL*/
 unsigned long roundtrip;
 
@@ -418,7 +418,7 @@ unsigned long roundtrip;
 #define CSR0_SETUP	(0)
 #define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_TINTM | CSR3_RINTM)) | CSR3_DXSUFLO)
 #define CSR4_SETUP	((CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) | CSR4_RTFLAGS)
-#define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE)
+#define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE | CSR5_SINTE)
 #ifndef AUTOPOLL_BROKEN
 #define CSR7_SETUP	(CSR7_RTFLAGS | CSR7_MAPINTE)
 #else
@@ -433,7 +433,6 @@ static void amdEthIntDisable();
 #endif
 
 static void amdEthIsr();
-int amdEthUpdateTxStats(AmdEthDev d, unsigned i);
 static unsigned long long read_counter(AmdEthDev d, int csr, volatile unsigned long *pHi);
 
 static AmdEthDevRec devices[NUM_ETH_DEVICES]={
@@ -444,6 +443,10 @@ static AmdEthDevRec devices[NUM_ETH_DEVICES]={
   0
 },
 };
+
+#ifdef TASK_DRIVEN
+rtems_id	amdEthQ = 0;
+#endif
 
 #ifndef HAVE_LIBBSPEXT
 /* Because we cannot pass an argument to the ISR, we must
@@ -483,13 +486,13 @@ static unsigned char rxbuffer[NumberOf(devices[0].rdesc)][2048];
  */
 static inline void
 WriteIndReg(
-	unsigned long value,
+	unsigned long val,
 	unsigned long idx,
 	volatile unsigned long *areg,
 	volatile unsigned long *dreg)
 {
 	__asm__ __volatile__(
-		"stwbrx %1, 0, %2; stwbrx %0, 0, %3": :"r"(value),"r"(idx),"r"(areg),"r"(dreg));
+		"stwbrx %1, 0, %2; stwbrx %0, 0, %3": :"r"(val),"r"(idx),"r"(areg),"r"(dreg));
 }
 
 static inline unsigned long
@@ -500,8 +503,28 @@ ReadIndReg(
 {
 	__asm__ __volatile__(
 		"stwbrx %0, 0, %2; eieio; lwbrx %0, 0, %3"
-		:"=r"(idx) 
+		:"=&r"(idx) 
 		:"0"(idx),"r"(areg),"r"(dreg));
+	return idx;
+}
+
+static inline unsigned long
+ModIndReg(
+	unsigned long amsk,
+	unsigned long omsk,
+	unsigned long idx,
+	volatile unsigned long *areg,
+	volatile unsigned long *dreg)
+{
+	__asm__ __volatile__(
+		"stwbrx %0,  0, %2 \n"
+		"eieio             \n"
+		"lwbrx  %0,  0, %3 \n"
+		"and	%0, %0, %4 \n"
+		"or     %0, %0, %5 \n"
+		"stwbrx %0,  0, %3 \n" 
+		:"=&r"(idx) 
+		:"0"(idx),"r"(areg),"r"(dreg),"r"(amsk),"r"(omsk));
 	return idx;
 }
 
@@ -513,12 +536,18 @@ ReadIndReg(
 #define RDPDECL register volatile unsigned long *rdp = &d->baseAddr->rdp
 #define BDPDECL register volatile unsigned long *bdp = &d->baseAddr->bdp
 
-#define WBCR(idx, val) WriteIndReg(val,idx,rap,bdp)
-#define WBCR1(val) wrle(val,bdp) /* write, using old rap */
-#define RBCR(idx) ReadIndReg(idx,rap,bdp)
-#define WCSR(idx, val) WriteIndReg(val,idx,rap,rdp)
-#define WCSR1(val) wrle(val,rdp) /* write, using old rap */
-#define RCSR(idx) ReadIndReg(idx,rap,rdp)
+#define RBCR(idx) \
+	ReadIndReg(idx,rap,bdp)
+#define WBCR(idx, val) \
+	WriteIndReg(val,idx,rap,bdp)
+#define RMWBCR(idx, andm, orm) \
+	ModIndReg(andm, orm, idx, rap, bdp)
+#define WCSR(idx, val) \
+	WriteIndReg(val,idx,rap,rdp)
+#define RMWCSR(idx, andm, orm) \
+	ModIndReg(andm, orm, idx, rap, rdp)
+#define RCSR(idx) \
+	ReadIndReg(idx,rap,rdp)
 
 #define GET_LINK_STAT() (WBCR(33, ((0x1e<<5)|24)),RBCR(34))
 
@@ -607,7 +636,7 @@ RDPDECL;
 	wrle(rxstat | RXDESC_STAT_OWN, &d->rdesc[0].STYLE.statLE);
 	/* yield the descriptor before enforcing a poll */
 	__asm__ __volatile__("eieio");
-	WCSR1( (RCSR(7) & ~CSR7_IRQ_STAT) | CSR7_RDMD );
+	RMWCSR( 7, ~CSR7_IRQ_STAT, CSR7_RDMD );
 }
 
 #ifdef __PPC__
@@ -622,7 +651,6 @@ amdEthInterruptWork(AmdEthDev d)
 {
 register unsigned long	csr0, csr5, tmp;
 unsigned long			savedAR;
-int						bogusIrq = 1;
 #ifdef __PPC__
 unsigned long			i=0;
 unsigned long			isrProf[ISR_PROF_DEPTH];
@@ -657,7 +685,6 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 			 */
 			ISR_PROF_INC();
 			d->stats.irqs++;
-			bogusIrq = 0;
 #if 0
 			if ( csr0 & CSR0_MISS ) {
 				/* missed frame - we use the hardware counter but action
@@ -748,7 +775,6 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 		/* restore address register contents */
 		d->baseAddr->rap=savedAR;
 	}
-	amdEthBogusIrqs += bogusIrq;
 #ifdef __PPC__
 	/* do profiling */
 	ISR_PROF_INC();
@@ -763,19 +789,12 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 #endif
 }
 
-static void
-amdEthIsr(AmdEthDev	d)
-{
-amdEthInterruptWork(d);
-}
-
 static inline void
 intDoEnable(AmdEthDev d)
 {
 RAPDECL;
 RDPDECL;
-	WCSR1( (RCSR(0) &~CSR0_IRQ_STAT) | CSR0_IENA);
-	WCSR1( (RCSR(5) &~CSR5_IRQ_STAT) | CSR5_SINTE);
+	RMWCSR( 0, ~CSR0_IRQ_STAT, CSR0_IENA);
 }
 
 static inline void
@@ -783,8 +802,7 @@ intDoDisable(AmdEthDev d)
 {
 RAPDECL;
 RDPDECL;
-	WCSR1( (RCSR(0) &~CSR0_IRQ_STAT) & ~CSR0_IENA);
-	WCSR1( (RCSR(5) &~CSR5_IRQ_STAT) & ~CSR5_SINTE);
+	RMWCSR( 0, ~(CSR0_IRQ_STAT | CSR0_IENA), 0);
 }
 
 
@@ -799,7 +817,7 @@ AmdEthDev	d;
 			  d->brokenbydesign.name == arg->name) {
 			RAPDECL;
 			RDPDECL;
-			return	(RCSR(0) & CSR0_IENA) || (RCSR(5) & CSR5_SINTE);
+			return	(RCSR(0) & CSR0_IENA);
 		}
 	}
 	return 0;
@@ -842,6 +860,27 @@ AmdEthDev	d;
 }
 #endif
 
+static void
+amdEthIsr(AmdEthDev	d)
+{
+#ifndef TASK_DRIVEN
+	amdEthInterruptWork(d);
+#else
+RAPDECL;
+RDPDECL;
+unsigned long savedAR;
+		/* save the rap before changing it (don't care about endianness) */
+		savedAR = *rap;
+		if ( (RCSR(0) & CSR0_INTR) ) {
+			/* disable interrupts; let task take care */
+			intDoDisable(d);
+			rtems_message_queue_send(amdEthQ, (void*)&d, sizeof(d));
+		}
+		d->baseAddr->rap = savedAR;
+#endif
+}
+
+
 int
 amdEthReceivePacket(AmdEthDev d, char *buf, int len)
 {
@@ -868,13 +907,17 @@ unsigned long			mode;
 	switch ( mode ) {
 		case AMDETH_FLG_RX_MODE_SYNC:
 
+			REGLOCK(d);
 			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+			REGUNLOCK(d);
 
 			/* block on an event */
 			if ( pSemWait(&d->sync) ) {
 				/* semaphore destroyed; device was closed */
 				return -1;
 			}
+
+			/* no need to lock; driver task doesn't touch stats in this mode */
 
 			/* update stats and return length */
 			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE))) )
@@ -883,26 +926,36 @@ unsigned long			mode;
 
 		case AMDETH_FLG_RX_MODE_POLL:
 
-			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE))) )
+			/* no need to lock; driver task doesn't touch stats in this mode */
+
+			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[0].STYLE.statLE))) ) {
 				rval = ((int)rdle(&d->rdesc[0].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
 
-			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+				REGLOCK(d);
+				yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
+				REGUNLOCK(d);
+			}
 
 			return rval;
 
 		case AMDETH_FLG_RX_MODE_AUTO:
+
+			REGLOCK(d);
 			{
 			RAPDECL;
 			RDPDECL;
 			/* activate RX auto polling ? */
-			WCSR1(RCSR(7) & ~ (CSR7_RXDPOLL|CSR7_IRQ_STAT));
+			RMWCSR(7, ~(CSR7_RXDPOLL|CSR7_IRQ_STAT), 0);
 			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK));
 			}
+			REGUNLOCK(d);
+
 			return 0;
 
 		default:
 			break;
 	}
+
 	/* should never get here */
 	return AMDETH_ERROR;
 }
@@ -999,7 +1052,7 @@ AmdEthDev	d;
 
 #if 0 /* not yet ready - unsure if really needed */
 		/* set LOLATRX (requires SRAM > 0, CSR127(RPA) ) */
-		WBCR1(RBCR(27) | BCR27_LOLATRX);
+		RMWBCR( 27, ~0, BCR27_LOLATRX);
 #endif
 
 		/* clear interrupt and mask unneeded sources */
@@ -1023,6 +1076,9 @@ AmdEthDev	d;
 		}
 		if ( flags & AMDETH_FLG_NOBCST ) {
 			tmp |= CSR15_DRCVBC;
+		}
+		if ( flags & AMDETH_FLG_DO_RETRY ) {
+			tmp &= ~CSR15_DRTY;
 		}
 		WCSR(15, tmp);
 
@@ -1081,14 +1137,14 @@ AmdEthDev	d;
 			 * If I don't do this, the link still works but experiences
 			 * quite high bit errors (CRC errors)!
 			 */
-			WBCR1( RBCR(2) | BCR2_DISSCR_SFEX );
+			RMWBCR( 2, ~0, BCR2_DISSCR_SFEX );
 		} else {
-			WBCR1( RBCR(2) & ~BCR2_DISSCR_SFEX );
+			RMWBCR( 2, ~BCR2_DISSCR_SFEX, 0 );
 		}
 
 #ifndef AUTOPOLL_BROKEN
 		/* Enable MII auto polling */
-		WBCR1( RBCR(32) | BCR32_APEP );
+		RMWBCR( 32, ~0, BCR32_APEP );
 #endif
 		/* obtain initial link status */
 		d->stats.linkStat = GET_LINK_STAT();
@@ -1102,6 +1158,7 @@ AmdEthDev	d;
 	 */
 	if ( AMDETH_FLG_RX_MODE_SYNC==d->rmode )
 		pSemCreate( 0/* binary */, 0 /* empty */, &d->sync);
+	pSemCreate( 1/* binary */, 1 /* full */, &d->mutex );
 
 	/* install ISR */
 #ifdef HAVE_LIBBSPEXT
@@ -1264,14 +1321,24 @@ int l = sizeof(*h);
 	{
 	RAPDECL;
 	RDPDECL;
-	/* TSILL */
-	unsigned long flags;
-	/* demand transmission without changing status bits - we
-	 * hope nobody (ISR or other thread) modifies the IENA flag while we are
-	 * tampering with this register...
+	unsigned long flags, saved;
+
+
+	/* demand transmission without changing status bits.
+	 * NOTE: taking the register mutex doesn't help us here.
+	 * we must make sure the ISR doesn't change CSR0.
+	 * We also must save/restore the RAP since we are not
+	 * taking the mutex -- could be that we are executing
+	 * while the driver is in its critical section.
+	 * We could take the mutex in addition to disabling
+	 * interrupts but I feel this is faster...
 	 */
+
 	rtems_interrupt_disable(flags);
-	WCSR1((RCSR(0) & ~(CSR0_IRQ_STAT)) | CSR0_TDMD);
+	saved = *rap;
+	RMWCSR(0, ~CSR0_IRQ_STAT, CSR0_TDMD);
+	d->baseAddr->rap = saved;
+	/* TSILL */
 	__asm__ __volatile__("mftb %0":"=r"(roundtrip));
 	rtems_interrupt_enable(flags);
 	}
@@ -1302,38 +1369,37 @@ int	inc;
 		fprintf(f,"AMD Eth Interface #%i (", d - devices);
 		amdEthPrintAddr(d, f, 0);
 		fprintf(f,") statistics:\n");
-		fprintf(f,"  # packets sent: %li\n",     d->stats.txPackets);
-		fprintf(f,"  # pkt. received:%li\n",  d->stats.rxPackets);
-		fprintf(f,"  # interrupts:   %li\n",     d->stats.irqs);
+		fprintf(f,"  # packets sent: %lu\n",     d->stats.txPackets);
+		fprintf(f,"  # pkt. received:%lu\n",  d->stats.rxPackets);
+		fprintf(f,"  # interrupts:   %lu\n",     d->stats.irqs);
 		fprintf(f,"TX Errors:\n");
 		/* all below here are error counts */
 #ifdef RT_DRIVER
-		fprintf(f,"  deferred TX:    %li\n",     d->stats.txDeferred);	/* deferrals are errors */
+		fprintf(f,"  deferred TX:    %lu\n",     d->stats.txDeferred);	/* deferrals are errors */
 #endif
-		fprintf(f,"  fifo underflow: %li\n",    d->stats.txFifoUnderflow);
-		fprintf(f,"  late collision: %li\n",    d->stats.txLateCollision);
-		fprintf(f,"  carrier loss:   %li\n",    d->stats.txCarrierLoss);
-		fprintf(f,"  retries:        %li\n",    d->stats.txRetry);
-		fprintf(f,"  bus parity err.:%li\n",    d->stats.txBusParity);
+		fprintf(f,"  fifo underflow: %lu\n",    d->stats.txFifoUnderflow);
+		fprintf(f,"  late collision: %lu\n",    d->stats.txLateCollision);
+		fprintf(f,"  carrier loss:   %lu\n",    d->stats.txCarrierLoss);
+		fprintf(f,"  retries:        %lu\n",    d->stats.txRetry);
+		fprintf(f,"  bus parity err.:%lu\n",    d->stats.txBusParity);
 
 		fprintf(f,"RX Errors:\n");
-		fprintf(f,"  RX Memory err.: %li\n",    d->stats.rxMemory);
-		fprintf(f,"  fifo overflow:  %li\n",    d->stats.rxFifoOverflow);
-		fprintf(f,"  framing err.:   %li\n",    d->stats.rxFraming);
-		fprintf(f,"  CRC err.:       %li\n",    d->stats.rxCrc);
-		fprintf(f,"  bus parity err.:%li\n",    d->stats.rxBusParity);
-		fprintf(f,"  missed frames:  %lli\n",   read_counter(d, 112, &d->stats.rxOverrunHi));
-		fprintf(f,"  collision Hi:   %lli\n",   read_counter(d, 114, &d->stats.rxCollisionHi));
-		fprintf(f,"  system err.:    %li\n",    d->stats.sysError);
+		fprintf(f,"  RX Memory err.: %lu\n",    d->stats.rxMemory);
+		fprintf(f,"  fifo overflow:  %lu\n",    d->stats.rxFifoOverflow);
+		fprintf(f,"  framing err.:   %lu\n",    d->stats.rxFraming);
+		fprintf(f,"  CRC err.:       %lu\n",    d->stats.rxCrc);
+		fprintf(f,"  bus parity err.:%lu\n",    d->stats.rxBusParity);
+		fprintf(f,"  missed frames:  %llu\n",   read_counter(d, 112, &d->stats.rxOverrunHi));
+		fprintf(f,"  collision Hi:   %llu\n",   read_counter(d, 114, &d->stats.rxCollisionHi));
+		fprintf(f,"  system err.:    %lu\n",    d->stats.sysError);
 		fprintf(f,"PHY status:\n");
-		fprintf(f,"  interrupts:     %li\n",    d->stats.miiIrqs);
+		fprintf(f,"  interrupts:     %lu\n",    d->stats.miiIrqs);
 		fprintf(f,"        link:     %s, 10%s-%s\n",
 				d->stats.linkStat & ANR24_LINK_UP   ? "up"   : "DOWN",
 				d->stats.linkStat & ANR24_SPEED_100 ? "0"    : "",
 				d->stats.linkStat & ANR24_FULLDUP   ? "full" : "half");
 	}
 
-	fprintf(f,"%i bogus IRQs detected\n",       amdEthBogusIrqs);
 	return 0;
 }
 
@@ -1342,37 +1408,36 @@ int	inc;
 unsigned long
 lance_read_csr(int offset,AmdEthDev d)
 {
-unsigned long v, flags;
+unsigned long v;
 if ( !d ) d = &devices[0];
-	rtems_interrupt_disable(flags);
+	REGLOCK(d);
 	v = ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->rdp);
-	rtems_interrupt_enable(flags);
+	REGUNLOCK(d);
 	return v;
 }
 
 void
 lance_write_csr(unsigned long val, int offset, AmdEthDev d)
 {
-unsigned long flags;
 if ( !d ) d = &devices[0];
-	rtems_interrupt_disable(flags);
+	REGLOCK(d);
 	{
 	RAPDECL;
 	unsigned long saved=*rap;
 	WriteIndReg(val,offset,rap,&d->baseAddr->rdp);
 	*rap = saved;
 	}
-	rtems_interrupt_enable(flags);
+	REGUNLOCK(d);
 }
 
 unsigned long
 lance_read_bcr(int offset, AmdEthDev d)
 {
-unsigned long v, flags;
+unsigned long v;
 if ( !d ) d = &devices[0];
-	rtems_interrupt_disable(flags);
+	REGLOCK(d);
 	v = ReadIndReg(offset,&d->baseAddr->rap,&d->baseAddr->bdp);
-	rtems_interrupt_enable(flags);
+	REGUNLOCK(d);
 	return v;
 
 }
@@ -1380,11 +1445,10 @@ if ( !d ) d = &devices[0];
 void
 lance_write_bcr(unsigned long val, int offset, AmdEthDev d)
 {
-unsigned long flags;
 if ( !d ) d = &devices[0];
-	rtems_interrupt_disable(flags);
+	REGLOCK(d);
 	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->bdp);
-	rtems_interrupt_enable(flags);
+	REGUNLOCK(d);
 }
 
 /* how to read a two-word counter without disabling interrupts
@@ -1450,10 +1514,11 @@ if ( !d ) d = &devices[0];
  *
  */
 
-/* a simplified version who assumes the ISR always runs prior
+/* a simplified version that assumes the ISR always runs prior
  * to testing hw_ovfl
  */
 
+#ifndef TASK_DRIVEN
 static unsigned long long
 read_counter(AmdEthDev d, int csr_no, volatile unsigned long *pHi)
 {
@@ -1462,16 +1527,98 @@ unsigned long  hi;
 RAPDECL;
 RDPDECL;
 
-		lo_1 = RCSR(csr_no);
-		hi   = *pHi;
-		lo_2 = RCSR(csr_no);
+	lo_1 = RCSR(csr_no);
+	hi   = *pHi;
+	lo_2 = RCSR(csr_no);
 
-		if (lo_2 < lo_1) {
-			/* overflow has just occurred; re-read Hi */
-			hi = *pHi;
-		}
-		return (hi<<16)|lo_2;
+	if (lo_2 < lo_1) {
+		/* overflow has just occurred; re-read Hi */
+		hi = *pHi;
+	}
+	return (hi<<16)|lo_2;
 }
+
+#else
+
+/* version using task driven mode and mutex */
+static unsigned long long
+read_counter(AmdEthDev d, int csr_no, volatile unsigned long *pHi)
+{
+unsigned short lo_1, lo_2;
+unsigned long  hi, pend;
+RAPDECL;
+RDPDECL;
+
+	REGLOCK(d);
+	lo_1 = RCSR(csr_no);
+	pend = RCSR(4);
+	lo_2 = RCSR(csr_no);
+	hi   = *pHi;
+	REGUNLOCK(d);
+
+	assert( 112 == csr_no || 114 == csr_no );
+
+	pend &= ( 112 == csr_no ) ? CSR4_MFCO : CSR4_RCVCCO;
+
+	/* did overflow occur but not between two counter reads ? */
+	if ( pend && lo_2 >= lo_1 ) {
+		hi++; /* true pend */
+	}
+		
+	return (hi<<16)|lo_1;
+}
+#endif
+
+#ifdef TASK_DRIVEN
+
+static PTaskId amdTaskId = 0;
+
+static
+PTASK_DECL(amdeth_task,arg)
+{
+AmdEthDev d;
+unsigned  s;
+
+	while ( RTEMS_SUCCESSFUL
+		    == rtems_message_queue_receive(
+					amdEthQ,
+					&d,
+					&s,
+					RTEMS_WAIT,
+					RTEMS_NO_TIMEOUT) ) {
+
+		REGLOCK(d);
+		amdEthInterruptWork(d);
+		REGUNLOCK(d);
+
+		/* must not use 'd' after enabling interrupt again */
+		REGLOCK(d);
+		intDoEnable(d);
+		REGUNLOCK(d);
+	}
+	fprintf(stderr,"AmdEth driver task exited...\n");
+
+	amdTaskId = 0;
+
+	PTASK_LEAVE; /* causes the task to delete itself */
+}
+
+int
+amdEthStart(int prio)
+{
+	if (!prio)
+		prio = 20;
+
+	prio = NATIVE2SCALED(prio);
+
+	if ( amdTaskId ) {
+		fprintf(stderr,"AMD task already running\n");
+		return -1;
+	}
+
+	return pTaskSpawn("amdT", prio, 1000, 0, amdeth_task, 0, &amdTaskId) ? 0 : amdTaskId;
+}
+#endif
 
 void
 _cexpModuleInitialize(void *mod)
@@ -1480,10 +1627,24 @@ int i;
 	for ( i=0; i<NumberOf(devices); i++ ) {
 		devices[i].irqLine = -1;
 	}
+#ifdef TASK_DRIVEN
+	assert( RTEMS_SUCCESSFUL
+	        == rtems_message_queue_create(
+					rtems_build_name('a','m','d','Q'),
+					NUM_ETH_DEVICES,
+					sizeof(&devices[0]),
+					RTEMS_FIFO | RTEMS_LOCAL,
+					&amdEthQ) );
+#endif
 }
 
 int amdEthCloseDev(AmdEthDev d)
 {
+RAPDECL;
+RDPDECL;
+unsigned long flags;
+int           retry;
+
 	if ( d < devices || d >= devices + NumberOf(devices) ) {
 		fprintf(stderr,"Invalid device pointer\n");
 		return -1;
@@ -1492,17 +1653,42 @@ int amdEthCloseDev(AmdEthDev d)
 		fprintf(stderr,"Device not open\n");
 		return -1;
 	}
-{
-RAPDECL;
-RDPDECL;
-	/* STOP DMA */
-	WCSR( 0, CSR0_SETUP | CSR0_STOP);
-	/* disable interrupts */
-}
-	intDoDisable(d);
+
+
+	for (retry=10; retry>0; ) {
+
+
+		REGLOCK(d);
+		rtems_interrupt_disable(flags);
+
+		if ( !(CSR0_IENA & RCSR(0)) ) {
+			/* interrupts disabled, i.e., ISR has
+			 * posted to task - we must delay until the
+			 * task is done
+			 */
+		} else {
+			/* STOP DMA and disable interrupts  */
+			WCSR( 0, CSR0_SETUP | CSR0_STOP);
+			retry = -1;
+		}
+
+		rtems_interrupt_enable(flags);
+		REGUNLOCK(d);
+
+		if ( !--retry ) {
+			fprintf(stderr,"Driver still busy after 10 retries\n");
+			return -1;
+		}
+
+		rtems_task_wake_after(10);
+	}
+
 	if (d->sync) {
 		/* delete sema; release blocked task with error  */
 		pSemDestroy(&d->sync);
+	}
+	if (d->mutex) {
+		pSemDestroy(&d->mutex);
 	}
 #ifdef HAVE_LIBBSPEXT
 	if ( d->irqLine >= 0 ) {
@@ -1517,27 +1703,35 @@ RDPDECL;
 int
 _cexpModuleFinalize(void *mod)
 {
-int		 	i;
+int		 	i, errs = 0;
 AmdEthDev	d;
 	
 #ifdef HAVE_LIBBSPEXT
 	for ( d=devices, i=0; i<NumberOf(devices); i++, d++ ) {
 		if ( d->baseAddr ) {
-			amdEthCloseDev(d);
+			errs |= amdEthCloseDev(d);
 		}
 	}
 #else
 	for ( i=0; i < NumberOf(insaneApiMap); i++) {
 		for ( d=insaneApiMap[i].device; d; d=d->next) {
-			amdEthCloseDev(d);
+			errs |= amdEthCloseDev(d);
 		}
 		/* uninstall ISR */
 		BSP_remove_rtems_irq_handler(&insaneApiMap[i].device->brokenbydesign);
 	}
 #endif
+
+#ifdef TASK_DRIVEN
+	/* deleting the queue causes the thread to leave and
+	 * delete itself (PTASK_LEAVE) -- don't synchronize; just
+	 * sleep...
+	 */
+	rtems_message_queue_delete(amdEthQ);
+#endif
 	/* hack; allow released tasks to finish */
 	sleep(1);
-	return 0;
+	return errs;
 }
 
 int

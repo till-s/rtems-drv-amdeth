@@ -55,7 +55,7 @@ include $(RTEMS_ROOT)/make/leaf.cfg
 # (OPTIONAL) Add local stuff here using +=
 #
 
-DEFINES  += -DHAVE_LIBBSPEXT
+DEFINES  += -DHAVE_LIBBSPEXT -DTASK_DRIVEN
 CPPFLAGS +=
 CFLAGS   +=
 
