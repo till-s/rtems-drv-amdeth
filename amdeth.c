@@ -22,7 +22,7 @@
 #include <netinet/in.h>	/* htons */
 
 #include "amdeth.h"
-#include "wrap.h"
+#include "wrap/wrap.h"
 
 #define NUM_ETH_DEVICES 4	/* how many devices our table supports */
 #define RT_DRIVER			/* whether to set some flags for real-time specific application */
