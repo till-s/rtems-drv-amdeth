@@ -39,7 +39,18 @@ typedef unsigned int  pci_ulong;
 typedef unsigned char pci_ubyte;
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + PCI_MEM_BASE)
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
+
+#define ISMINVERSION(ma,mi,re) \
+	(    __RTEMS_MAJOR__  > (ma)	\
+	 || (__RTEMS_MAJOR__ == (ma) && __RTEMS_MINOR__  > (mi))	\
+	 || (__RTEMS_MAJOR__ == (ma) && __RTEMS_MINOR__ == (mi) && __RTEMS_REVISION__ >= (re)) \
+    )
+
+#if ISMINVERSION(4,6,99)
+#define pciFindDevice pci_find_device
+#else
 #define pciFindDevice BSP_pciFindDevice
+#endif
 #define pciConfigOutLong pci_write_config_dword
 #define pciConfigOutByte pci_write_config_byte
 #define pciConfigInLong pci_read_config_dword
