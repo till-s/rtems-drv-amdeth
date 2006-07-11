@@ -71,11 +71,11 @@ typedef unsigned char pci_ubyte;
 #if defined(__PPC) || defined(__PPC__)
 static inline void wrle(unsigned long w, volatile void *addr)
 {
-	__asm__ __volatile__("stwbrx %0, 0, %1"::"r"(w),"r"(addr));
+	__asm__ __volatile__("stwbrx %1, 0, %2":"=m"(*(unsigned long*)addr):"r"(w),"r"(addr));
 }
 static inline unsigned long rdle(unsigned long *addr)
 {
-	__asm__ __volatile__("lwbrx %0, 0, %0":"=r"(addr):"0"(addr));
+	__asm__ __volatile__("lwbrx %0, 0, %0":"=r"(addr):"0"(addr),"m"(*addr));
 	return (unsigned long)addr;
 }
 #endif
@@ -497,7 +497,7 @@ WriteIndReg(
 	volatile unsigned long *dreg)
 {
 	__asm__ __volatile__(
-		"stwbrx %1, 0, %2; stwbrx %0, 0, %3": :"r"(val),"r"(idx),"r"(areg),"r"(dreg));
+		"stwbrx %3, 0, %4; stwbrx %2, 0, %5":"=m"(*areg),"=m"(*dreg) :"r"(val),"r"(idx),"r"(areg),"r"(dreg));
 }
 
 static inline unsigned long
@@ -507,9 +507,9 @@ ReadIndReg(
 	volatile unsigned long *dreg)
 {
 	__asm__ __volatile__(
-		"stwbrx %0, 0, %2; eieio; lwbrx %0, 0, %3"
-		:"=&r"(idx) 
-		:"0"(idx),"r"(areg),"r"(dreg));
+		"stwbrx %0, 0, %3; eieio; lwbrx %0, 0, %4"
+		:"=&r"(idx),"=m"(*areg)
+		:"0"(idx),"r"(areg),"r"(dreg),"m"(*dreg));
 	return idx;
 }
 
@@ -522,13 +522,13 @@ ModIndReg(
 	volatile unsigned long *dreg)
 {
 	__asm__ __volatile__(
-		"stwbrx %0,  0, %2 \n"
+		"stwbrx %0,  0, %4 \n"
 		"eieio             \n"
-		"lwbrx  %0,  0, %3 \n"
-		"and	%0, %0, %4 \n"
-		"or     %0, %0, %5 \n"
-		"stwbrx %0,  0, %3 \n" 
-		:"=&r"(idx) 
+		"lwbrx  %0,  0, %5 \n"
+		"and	%0, %0, %6 \n"
+		"or     %0, %0, %7 \n"
+		"stwbrx %0,  0, %5 \n" 
+		:"=&r"(idx),"=m"(*areg),"+m"(*dreg)
 		:"0"(idx),"r"(areg),"r"(dreg),"r"(amsk),"r"(omsk));
 	return idx;
 }
