@@ -1769,7 +1769,7 @@ static
 PTASK_DECL(amdeth_task,arg)
 {
 AmdEthDev d;
-unsigned  s;
+uint32_t  s;
 
 	while ( RTEMS_SUCCESSFUL
 		    == rtems_message_queue_receive(
