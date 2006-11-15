@@ -1226,7 +1226,7 @@ AmdEthDev	d;
 
 	/* install ISR */
 #ifdef HAVE_LIBBSPEXT
-	if ( bspExtInstallSharedISR(BSP_PCI_IRQ_LOWEST_OFFSET + irqLine, (void (*)(void*))amdEthIsr, (void*)d, 0) ) {
+	if ( bspExtInstallSharedISR(irqLine, (void (*)(void*))amdEthIsr, (void*)d, 0) ) {
 		fprintf(stderr,"Unable to connect to interrupt\n");
 		return -1;
 	}
@@ -1237,7 +1237,7 @@ AmdEthDev	d;
 	d->brokenbydesign.on=amdEthIntEnable;
 	d->brokenbydesign.off=amdEthIntDisable;
 	d->brokenbydesign.isOn=amdEthIntIsOn;
-	d->brokenbydesign.name=BSP_PCI_IRQ0 + (d->irqLine = irqLine);
+	d->brokenbydesign.name=(d->irqLine = irqLine);
 
 	/* is an ISR for our line already installed ? */
 	for (i = NumberOf(insaneApiMap) - 1; i >=0; i-- ) {
@@ -1886,7 +1886,7 @@ int           retry;
 	}
 #ifdef HAVE_LIBBSPEXT
 	if ( d->irqLine >= 0 ) {
-		bspExtRemoveSharedISR(BSP_PCI_IRQ_LOWEST_OFFSET + d->irqLine, (void (*)(void*))amdEthIsr, d);
+		bspExtRemoveSharedISR(d->irqLine, (void (*)(void*))amdEthIsr, d);
 	}
 #endif
 	memset(d,0,sizeof(*d)); /* mark slot free */
