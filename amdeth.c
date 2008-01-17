@@ -716,7 +716,7 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 
 				/* received a packet, post an event */
 				register unsigned long dstat;
-				while ( ! ((dstat = rdle(&d->rdesc[d->widx].STYLE.statLE)) & RXDESC_STAT_OWN) ) {
+				while ( ! ((dstat = rdle(&d->rdesc[d->widx].STYLE.statLE)) & RXDESC_STAT_OWN) && ( dstat & RXDESC_STAT_BCNT_MSK) ) {
 					/* TSILL */
 					unsigned long now;
 					__asm__ __volatile__("mftb %0":"=r"(now));
@@ -738,7 +738,14 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 							yieldRx(d,dstat,d->widx);
 						break;
 						case AMDETH_FLG_RX_MODE_SYNC:
+							/* mark this descriptor as 'handled' so that
+							 * while loop terminates when all dirty buffers
+							 * have been posted.
+							 */
+							wrle( dstat & ~RXDESC_STAT_BCNT_MSK, &d->rdesc[d->widx].STYLE.statLE );
+
 							pSemPost(&d->sync);
+						case AMDETH_FLG_RX_MODE_POLL:
 						break;
 					}
 					d->widx = ++d->widx % d->nRdesc;
@@ -1769,7 +1776,7 @@ static
 PTASK_DECL(amdeth_task,arg)
 {
 AmdEthDev d;
-uint32_t  s;
+size_t    s;
 
 	while ( RTEMS_SUCCESSFUL
 		    == rtems_message_queue_receive(
