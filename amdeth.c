@@ -29,14 +29,23 @@
 #ifdef __rtems__
 #include <rtems.h>
 #include <bsp.h>
-#include <bsp/pci.h>
-#include <bsp/irq.h>
+#include <rtems/pci.h>
+#include <rtems/irq.h>
+#ifdef __PPC__
 #include <libcpu/io.h>
+#endif
 #ifdef HAVE_LIBBSPEXT
 #include <bsp/bspExt.h>
 #endif
 typedef unsigned int  pci_ulong;
 typedef unsigned char pci_ubyte;
+
+#ifndef PCI_MEM_BASE
+#define PCI_MEM_BASE 0
+#endif
+#ifndef PCI_DRAM_OFFSET
+#define PCI_DRAM_OFFSET 0
+#endif
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr) + PCI_MEM_BASE)
 #define LOCAL2PCI(memaddr) ((pci_ulong)(memaddr) + PCI_DRAM_OFFSET)
 
@@ -67,18 +76,40 @@ typedef unsigned char pci_ubyte;
 #error "Unknown Architecture"
 #endif
 
-#ifdef CPU_BIG_ENDIAN
+#ifdef __i386__
+static inline void iobarrier_r()
+{ asm volatile("lfence"); }
+static inline void iobarrier_w()
+{ asm volatile("sfence"); }
+static inline void iobarrier_rw()
+{ asm volatile("mfence"); }
+#endif
+
+#if CPU_BIG_ENDIAN == TRUE
 #if defined(__PPC) || defined(__PPC__)
-static inline void wrle(unsigned long w, volatile void *addr)
+static inline void wrle(unsigned long w, volatile unsigned long *addr)
 {
-	__asm__ __volatile__("stwbrx %1, 0, %2":"=m"(*(unsigned long*)addr):"r"(w),"r"(addr));
+	__asm__ __volatile__("stwbrx %1, 0, %2":"=m"(*addr):"r"(w),"r"(addr));
 }
 static inline unsigned long rdle(unsigned long *addr)
 {
 	__asm__ __volatile__("lwbrx %0, 0, %0":"=r"(addr):"0"(addr),"m"(*addr));
 	return (unsigned long)addr;
 }
+#else
+#error "rdle/wrle for big endian CPU not implemented"
 #endif
+#elif CPU_LITTLE_ENDIAN == TRUE
+static inline void wrle(unsigned long w, volatile unsigned long *addr)
+{
+	*addr = w;
+}
+static inline unsigned long rdle(unsigned long *addr)
+{
+	return *addr;
+}
+#else
+#error "Neither CPU_BIG_ENDIAN nor CPU_LITTLE_ENDIAN is TRUE"
 #endif
 
 #ifndef PCI_VENDOR_ID_AMD
@@ -300,7 +331,7 @@ typedef union RxBufDescU_ {
 #define RXDESC_STAT_ONES	(15<<12)	/* host MUST write/set these */
 #define RXDESC_STAT_BCNT_MSK	((1<<12)-1)	/* 2s COMPLEMENT of buffer length */
 
-#define NumberOf(arr) (sizeof(arr)/sizeof(arr[0]))
+#define NumberOf(arr) ((unsigned)(sizeof(arr)/sizeof(arr[0])))
 
 /* TX buffer descriptor
  * Note that the Am79C973 uses this area LITTLE ENDIAN
@@ -378,9 +409,7 @@ typedef struct AmdEthDevRec_ {
 		unsigned long	rxPackets;	/* # packets received */
 		unsigned long	irqs;
 		/* all below here are error counts */
-#ifdef RT_DRIVER
-		unsigned long	txDeferred;	/* deferrals are errors */
-#endif
+		unsigned long	txDeferred;	/* deferrals are errors (in RT mode) */
 		unsigned long	txFifoUnderflow;
 		unsigned long	txLateCollision;
 		unsigned long	txCarrierLoss;
@@ -400,36 +429,49 @@ typedef struct AmdEthDevRec_ {
 	}		stats;
 } AmdEthDevRec;
 
+#ifdef __PPC__
 /*TSILL*/
 unsigned long roundtrip;
+#endif
 
 /* Some setup bits */
-#ifdef RT_DRIVER
-#define TXDESC_ERRS	(TXDESC_CSR1_DEF | TXDESC_CSR1_ERR)
-#define CSR4_RTFLAGS	(CSR4_TXDPOLL)	/* transmit on demand only */
-#define CSR7_RTFLAGS	(CSR7_RXDPOLL)	/* poll RX buffers on demand only */
-#define CSR15_RTFLAGS	(CSR15_DRTY)	/* don't retry transmission - there should be no collisions
+#define TXDESC_ERRS_RT_YES	(TXDESC_CSR1_DEF | TXDESC_CSR1_ERR)
+#define CSR4_RTFLAGS_YES	(CSR4_TXDPOLL)	/* transmit on demand only */
+#define CSR7_RTFLAGS_YES	(CSR7_RXDPOLL)	/* poll RX buffers on demand only */
+#define CSR15_RTFLAGS_YES	(CSR15_DRTY)	/* don't retry transmission - there should be no collisions
 					 * and we'd rather know when something goes wrong
 					 */
-#define CSR100_SETUP	200		/* allow 20 us max bus latency */
-#else
-#define TXDESC_ERRS	(TXDESC_CSR1_ERR)
-#define CSR4_RTFLAGS	(0)
-#define CSR7_RTFLAGS	(0)
-#define CSR15_RTFLAGS	(0)
-#define CSR100_SETUP	1500		/* allow 150 us max bus latency */
-#endif
+#define CSR100_RTFLAGS_YES	200		/* allow 20 us max bus latency */
+
+#define TXDESC_ERRS_RT_NO	(TXDESC_CSR1_ERR)
+#define CSR4_RTFLAGS_NO	(0)
+#define CSR7_RTFLAGS_NO	(0)
+#define CSR15_RTFLAGS_NO	(0)
+#define CSR100_RTFLAGS_NO	1500		/* allow 150 us max bus latency */
+
+#define TXDESC_ERRS(d)	((d)->flags & AMDETH_FLG_RT_DIS ? TXDESC_ERRS_RT_NO : TXDESC_ERRS_RT_YES)
+#define CSR4_RTFLAGS(d) ((d)->flags & AMDETH_FLG_RT_DIS ? CSR4_RTFLAGS_NO : CSR4_RTFLAGS_YES)
+#define CSR7_RTFLAGS(d) ((d)->flags & AMDETH_FLG_RT_DIS ? CSR7_RTFLAGS_NO : CSR7_RTFLAGS_YES)
+#define CSR15_RTFLAGS(d) ((d)->flags & AMDETH_FLG_RT_DIS ? CSR15_RTFLAGS_NO : CSR15_RTFLAGS_YES)
+#define CSR100_RTFLAGS(d) ((d)->flags & AMDETH_FLG_RT_DIS ? CSR100_RTFLAGS_NO : CSR100_RTFLAGS_YES)
 
 #define CSR0_SETUP	(0)
 #define CSR3_SETUP	((CSR3_IRQ_MSK & ~(CSR3_MISSM | CSR3_MERRM | CSR3_TINTM | CSR3_RINTM)) | CSR3_DXSUFLO)
-#define CSR4_SETUP	((CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) | CSR4_RTFLAGS)
+#define CSR4_SETUP(d)	\
+	(                   \
+	  (CSR4_IRQ_MSK & ~(CSR4_MFCOM | CSR4_RCVCCOM)) \
+	| CSR4_RTFLAGS(d)   \
+	| CSR4_APAD_XMT     \
+	| CSR4_ASTRP_RCV	\
+	)
 #define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE | CSR5_SINTE)
 #ifndef AUTOPOLL_BROKEN
-#define CSR7_SETUP	(CSR7_RTFLAGS | CSR7_MAPINTE)
+#define CSR7_SETUP(d)	(CSR7_RTFLAGS(d) | CSR7_MAPINTE)
 #else
-#define CSR7_SETUP	(CSR7_RTFLAGS)
+#define CSR7_SETUP(d)	(CSR7_RTFLAGS(d))
 #endif
-#define CSR15_SETUP	(CSR15_RTFLAGS | CSR15_PORTSEL)
+#define CSR15_SETUP(d)	(CSR15_RTFLAGS(d) | CSR15_PORTSEL)
+#define CSR100_SETUP(d) (CSR100_RTFLAGS(d))
 
 #ifndef HAVE_LIBBSPEXT
 static int  amdEthIntIsOn();
@@ -496,8 +538,17 @@ WriteIndReg(
 	volatile unsigned long *areg,
 	volatile unsigned long *dreg)
 {
+#ifdef __PPC__
 	__asm__ __volatile__(
 		"stwbrx %3, 0, %4; stwbrx %2, 0, %5":"=m"(*areg),"=m"(*dreg) :"r"(val),"r"(idx),"r"(areg),"r"(dreg));
+#elif CPU_LITTLE_ENDIAN == TRUE
+	*areg = idx;
+	iobarrier_rw();
+	*dreg = val;
+	iobarrier_rw();
+#else
+#error "WriteIndReg not implemented for this CPU"
+#endif
 }
 
 static inline unsigned long
@@ -506,10 +557,19 @@ ReadIndReg(
 	volatile unsigned long *areg, 
 	volatile unsigned long *dreg)
 {
+#ifdef __PPC__
 	__asm__ __volatile__(
 		"stwbrx %0, 0, %3; eieio; lwbrx %0, 0, %4"
 		:"=&r"(idx),"=m"(*areg)
 		:"0"(idx),"r"(areg),"r"(dreg),"m"(*dreg));
+#elif CPU_LITTLE_ENDIAN == TRUE
+	*areg = idx;
+	iobarrier_rw();
+	idx   = *dreg;
+	iobarrier_rw();
+#else
+#error "ReadIndReg not implemented for this CPU"
+#endif
 	return idx;
 }
 
@@ -521,6 +581,7 @@ ModIndReg(
 	volatile unsigned long *areg,
 	volatile unsigned long *dreg)
 {
+#ifdef __PPC__
 	__asm__ __volatile__(
 		"stwbrx %0,  0, %4 \n"
 		"eieio             \n"
@@ -530,6 +591,15 @@ ModIndReg(
 		"stwbrx %0,  0, %5 \n" 
 		:"=&r"(idx),"=m"(*areg),"+m"(*dreg)
 		:"0"(idx),"r"(areg),"r"(dreg),"r"(amsk),"r"(omsk));
+#elif CPU_LITTLE_ENDIAN == TRUE
+	*areg = idx;
+	iobarrier_rw();
+	idx   = (*dreg & amsk) | omsk;
+	*dreg = idx;
+	iobarrier_rw();
+#else
+#error "ModIndReg not implemented for this CPU"
+#endif
 	return idx;
 }
 
@@ -588,14 +658,23 @@ amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d)
 	}
 	if (d)
 		amdEthSetSrc(h,d);
-	h->len=htons(0);
-	h->llc8022.dsap = 0xAA;
-	h->llc8022.ssap = 0xAA;
-	h->llc8022.ctrl = 0x3;
-	h->snap.org[0]  = 0x08; /* Stanford OUI */
-	h->snap.org[1]  = 0x00;
-	h->snap.org[2]  = 0x56;
-	h->snap.type    = htons(0x805b); /* stanford V kernel ethernet type */
+	if ( ! (d->flags & AMDETH_FLG_HDR_ETHERNET) ) {
+		h->len=htons(0);
+		h->llc8022.dsap = 0xAA;
+		h->llc8022.ssap = 0xAA;
+		h->llc8022.ctrl = 0x3;
+		h->snap.org[0]  = 0x08; /* Stanford OUI */
+		h->snap.org[1]  = 0x00;
+		h->snap.org[2]  = 0x56;
+		h->snap.type    = htons(0x805b); /* stanford V kernel ethernet type */
+	} else {
+		if ( h == &d->theader ) {
+			/* 'len' used for 'type' in plain ethernet headers */
+			h->len = htons(0x805b);
+		} else {
+			/* setting up the 'type' is responsability of the user */
+		}
+	}
 }
 
 static inline int
@@ -640,7 +719,7 @@ RAPDECL;
 RDPDECL;
 	wrle(rxstat | RXDESC_STAT_OWN, &d->rdesc[idx].STYLE.statLE);
 	/* yield the descriptor before enforcing a poll */
-	__asm__ __volatile__("eieio");
+	iobarrier_rw();
 	RMWCSR( 7, ~CSR7_IRQ_STAT, CSR7_RDMD );
 }
 
@@ -649,6 +728,8 @@ RDPDECL;
 unsigned long amdEthMaxIsrTicks = 0;
 unsigned long amdEthIsrProfile[ISR_PROF_DEPTH]={};
 #define ISR_PROF_INC()	asm volatile("mftb %0":"=r"(isrProf[i++]))
+#else
+#define ISR_PROF_INC() do {} while(0)
 #endif
 
 static void
@@ -717,10 +798,12 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 				/* received a packet, post an event */
 				register unsigned long dstat;
 				while ( ! ((dstat = rdle(&d->rdesc[d->widx].STYLE.statLE)) & RXDESC_STAT_OWN) && ( dstat & RXDESC_STAT_BCNT_MSK) ) {
+#ifdef __PPC__
 					/* TSILL */
 					unsigned long now;
 					__asm__ __volatile__("mftb %0":"=r"(now));
 					roundtrip = now-roundtrip;
+#endif
 
 					switch ( d->rmode ) {
 						default:
@@ -881,15 +964,18 @@ AmdEthDev	d;
 }
 #endif
 
+#ifdef __PPC__
 int debugProfileIdx = 0;
 
 struct {
 	unsigned long tb, ts, idx, pack;
 } debugProfile[20];
+#endif
 
 static void
 amdEthIsr(AmdEthDev	d)
 {
+#ifdef __PPC__
 	if ( debugProfileIdx < 20 ) {
 		asm volatile("mftb %0":"=r"(debugProfile[debugProfileIdx].tb));
 		char *ptr = ((EtherPacket)PCI2LOCAL(rdle(&d->rdesc[d->widx].STYLE.rbadrLE)))->data;
@@ -898,6 +984,7 @@ amdEthIsr(AmdEthDev	d)
 		debugProfile[debugProfileIdx].pack = *(long*)(ptr);
 		debugProfileIdx++;
 	}
+#endif
 #ifndef TASK_DRIVEN
 	amdEthInterruptWork(d);
 #else
@@ -930,7 +1017,10 @@ char					*obuf;
 
 	if ( d->sync && obuf ) {
 		/* SYNC mode [except during first round] */
-		pSemWait( &d->sync );
+		if ( pSemWait( &d->sync ) ) {
+			/* probably the device was closed */
+			return AMDETH_ERROR;
+		}
 	}
 
 	/* can't call this again if in AUTO_RX mode */
@@ -955,7 +1045,7 @@ char					*obuf;
 				/* make sure buffer address is written
 				 * before yielding the descriptor
 				 */
-				__asm__ __volatile__("eieio");
+				iobarrier_rw();
 
 				/* return previous buffer */
 				*pbuf = obuf;
@@ -975,7 +1065,7 @@ char					*obuf;
 			*pbuf = 0;
 
 			if ( ++d->ridx >= d->nRdesc ) {
-				asm volatile("eieio");
+				iobarrier_rw();
 				d->ridx = 0;
 				REGLOCK(d);
 				{
@@ -1035,11 +1125,11 @@ AmdEthDev	d;
 
 	memset(d, 0, sizeof(*d));
 
-	if ( (d->tmode=AMDETH_FLG_TX_MODE(flags)) > AMDETH_FLG_TX_MODE_POLL ) {
+	if ( (d->tmode=AMDETH_FLG_TX_MODE(flags)) > AMDETH_FLG_TX_MODE_MAX ) {
 		fprintf(stderr,"Invalid TX mode\n");
 		return AMDETH_ERROR;
 	}
-	if ( (d->rmode=AMDETH_FLG_RX_MODE(flags)) > AMDETH_FLG_RX_MODE_SYNC ) {
+	if ( (d->rmode=AMDETH_FLG_RX_MODE(flags)) > AMDETH_FLG_RX_MODE_MAX ) {
 		fprintf(stderr,"Invalid RX mode\n");
 		return AMDETH_ERROR;
 	}
@@ -1095,7 +1185,7 @@ AmdEthDev	d;
 
 	/* switch to 32bit io */
 	d->baseAddr->rdp = 0x0; /* 0 is endian-safe :-) */
-	__asm__ __volatile__("eieio");
+	iobarrier_rw();
 
 	/* initialize BCR regs */
 	{
@@ -1128,14 +1218,14 @@ AmdEthDev	d;
 
 		WCSR(3,  CSR3_SETUP | (AMDETH_FLG_RX_MODE_POLL == d->rmode ? CSR3_RINTM : 0 ));
 
-		WCSR(4,  CSR4_SETUP | CSR4_IRQ_STAT);
+		WCSR(4,  CSR4_SETUP(d) | CSR4_IRQ_STAT);
 
 		WCSR(5,  CSR5_SETUP | CSR5_IRQ_STAT);
 
-		WCSR(7, CSR7_SETUP | CSR7_IRQ_STAT);
+		WCSR(7, CSR7_SETUP(d) | CSR7_IRQ_STAT);
 
 		/* switch off receiver ? */
-		tmp = CSR15_SETUP;
+		tmp = CSR15_SETUP(d);
 		if ( d->tmode == AMDETH_FLG_TX_MODE_OFF ) {
 			tmp |= CSR15_DTX;
 		}
@@ -1171,15 +1261,14 @@ AmdEthDev	d;
 		WCSR(78, ((-(long)d->nTdesc) & 0xffff)); /* TX ring length */
 		WCSR(47, 0); /* default TX polling interval */
 
-		WCSR(100,CSR100_MERRTO_MASK & CSR100_SETUP);
+		WCSR(100,CSR100_MERRTO_MASK & CSR100_SETUP(d));
 
 	/* initialize the buffer descriptors */
 	{
+		char bcst[6]={0xff,0xff,0xff,0xff,0xff,0xff};
 		/* fill the ethernet header */
 		/* send to broadcast */
-		amdEthHeaderInit(&d->theader, 0, d);
-		/* broadcast address */
-		memset(d->theader.dst, 0xff, sizeof(d->theader.dst));
+		amdEthHeaderInit(&d->theader, bcst, d);
 		/* clear ownership flags */
 		for (i=0; i<NumberOf(d->tdesc); i++)
 			wrle(0, &d->tdesc[i].STYLE.csr1LE);
@@ -1325,7 +1414,7 @@ int		rval = 0;
 		continue;
 	}
 
-	if ( ! (csr1 & TXDESC_ERRS) )
+	if ( ! (csr1 & TXDESC_ERRS(d)) )
 		continue;
 
 	/* update statistics */
@@ -1352,7 +1441,7 @@ int		rval = 0;
 	}
 
 	/* reset error bit */
-	wrle( csr1 & ~ TXDESC_ERRS,
+	wrle( csr1 & ~ TXDESC_ERRS(d),
 		&d->tdesc[i].STYLE.csr1LE );
 	rval = AMDETH_ERROR;
 	}
@@ -1367,9 +1456,16 @@ int		rval = 0;
 int
 amdEthSendPacket(AmdEthDev d, EtherHeader h, void *data, int size)
 {
+	return amdEthSendPacketSwp(d, h, &data, size);
+}
+
+int
+amdEthSendPacketSwp(AmdEthDev d, EtherHeader h, void **pdata, int size)
+{
 register unsigned long csr1OR;
-int l = sizeof(*h);
+int l = amdEthGetHeaderSize(d);
 int i = d->tidx;
+void *obuf;
 
 	if (!d) d=&devices[0];
 
@@ -1381,8 +1477,8 @@ int i = d->tidx;
 		return AMDETH_BUSY;
 
 	/* previous transmission gave an error */
-	if ( csr1OR & TXDESC_ERRS ) {
-		if ( AMDETH_FLG_TX_MODE_AUTO == d->tmode ) {
+	if ( csr1OR & TXDESC_ERRS(d) ) {
+		if ( AMDETH_FLG_TX_MODE_POLL != d->tmode ) {
 			/* deferral error cannot be handled by auto update mode because
 			 * it apparently doesn't raise an interrupt :-(
 			 */
@@ -1411,30 +1507,41 @@ int i = d->tidx;
 
 	if (!h) {
 		h=&d->theader;
-		l=sizeof(d->theader);
+	} else if ( AMDETH_TX_HEADER_NONE == h ) {
+		l = 0;
+		h = 0;
 	}
-	((EtherHeader)h)->len = htons(l - 14  + size);
+	if ( h && !(d->flags & AMDETH_FLG_HDR_ETHERNET) )
+		h->len = htons(l - 14  + size);
 	/* clear csr2 */
 	wrle(0,
 		&d->tdesc[i+0].STYLE.csr2LE);
 	wrle(0,
 		&d->tdesc[i+1].STYLE.csr2LE);
+	
+	/* retrieve buffer that was in this slot before */
+	obuf = (void*)PCI2LOCAL(rdle(&d->tdesc[i+0].STYLE.tbadrLE));
+	if ( !obuf || obuf == &d->theader )
+		obuf = (void*)PCI2LOCAL(rdle(&d->tdesc[i+1].STYLE.tbadrLE));
+
 	/* set buffer address of first bd */
 	wrle(LOCAL2PCI(h),&d->tdesc[i+0].STYLE.tbadrLE);
 	/* set buffer address of second bd */
-	wrle(LOCAL2PCI(data), &d->tdesc[i+1].STYLE.tbadrLE);
+	wrle(LOCAL2PCI(*pdata), &d->tdesc[i+1].STYLE.tbadrLE);
+
+	*pdata = obuf;
 	/* setup csr1 of second bd */
 	/* NOTE: 2's complement of byte count! */
 	wrle((-size & TXDESC_CSR1_BCNT_MSK) |
 		TXDESC_CSR1_OWN | TXDESC_CSR1_ENP | TXDESC_CSR1_ONES,
 		&d->tdesc[i+1].STYLE.csr1LE);
 	/* make sure descriptors are written _before_ yielding the first one */
-	__asm__ __volatile__("eieio");
+	iobarrier_rw();
 	/* yield 1st descriptor */
 	wrle((-l & TXDESC_CSR1_BCNT_MSK) |
 		TXDESC_CSR1_OWN | TXDESC_CSR1_STP | TXDESC_CSR1_ONES,
 		&d->tdesc[i+0].STYLE.csr1LE);
-	__asm__ __volatile__("eieio");
+	iobarrier_rw();
 	{
 	RAPDECL;
 	RDPDECL;
@@ -1455,8 +1562,10 @@ int i = d->tidx;
 	saved = *rap;
 	RMWCSR(0, ~CSR0_IRQ_STAT, CSR0_TDMD);
 	d->baseAddr->rap = saved;
+#ifdef __PPC__
 	/* TSILL */
 	__asm__ __volatile__("mftb %0":"=r"(roundtrip));
+#endif
 	rtems_interrupt_enable(flags);
 	}
 	d->tidx = (i+2)%d->nTdesc;
@@ -1484,7 +1593,7 @@ int	inc;
 		if ( !d->baseAddr )
 			continue;
 
-		fprintf(f,"AMD Eth Interface #%i (", d - devices);
+		fprintf(f,"AMD Eth Interface #%u (", (unsigned)(d - devices));
 		amdEthPrintAddr(d, f, 0);
 		fprintf(f,") statistics:\n");
 		fprintf(f,"  # packets sent: %lu\n",     d->stats.txPackets);
@@ -1492,9 +1601,8 @@ int	inc;
 		fprintf(f,"  # interrupts:   %lu\n",     d->stats.irqs);
 		fprintf(f,"TX Errors:\n");
 		/* all below here are error counts */
-#ifdef RT_DRIVER
-		fprintf(f,"  deferred TX:    %lu\n",     d->stats.txDeferred);	/* deferrals are errors */
-#endif
+		if ( ! (d->flags & AMDETH_FLG_RT_DIS) )
+			fprintf(f,"  deferred TX:    %lu\n",     d->stats.txDeferred);	/* deferrals are errors */
 		fprintf(f,"  fifo underflow: %lu\n",    d->stats.txFifoUnderflow);
 		fprintf(f,"  late collision: %lu\n",    d->stats.txLateCollision);
 		fprintf(f,"  carrier loss:   %lu\n",    d->stats.txCarrierLoss);
@@ -1936,7 +2044,7 @@ AmdEthDev	d;
 }
 
 int
-amdEthGetHeaderSize()
+amdEthGetHeaderSize(AmdEthDev d)
 {
-	return sizeof(EtherHeaderRec);
+	return d->flags & AMDETH_FLG_HDR_ETHERNET ? 14 : sizeof(EtherHeaderRec);
 }

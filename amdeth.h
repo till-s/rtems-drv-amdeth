@@ -70,6 +70,7 @@ amdEthInit(AmdEthDev *d, int instance, int flags, int n_rx_desc, int n_tx_desc);
 /* Transmitter modes */
 #define AMDETH_FLG_TX_MODE_MSK		(0xf<<0)
 #define AMDETH_FLG_TX_MODE(flagword)	((flagword)&AMDETH_FLG_TX_MODE_MSK)
+#define AMDETH_FLG_TX_MODE_MAX		AMDETH_FLG_TX_MODE_LAZY
 
 /* TX unused / disabled */
 #define AMDETH_FLG_TX_MODE_OFF		(0<<0)
@@ -79,10 +80,16 @@ amdEthInit(AmdEthDev *d, int instance, int flags, int n_rx_desc, int n_tx_desc);
 #define AMDETH_FLG_TX_MODE_AUTO		(1<<0)
 /* user must poll (call amdEthUpdateTxStats()) to release desc/update stats */
 #define AMDETH_FLG_TX_MODE_POLL		(2<<0)
+/* TX ring is not swiped after interrupts but only when the user sends
+ * new packets then statistics from the oldest ring entry are picked
+ * up.
+ */
+#define AMDETH_FLG_TX_MODE_LAZY		(3<<0)
 
 /* Receiver modes */
 #define AMDETH_FLG_RX_MODE_MSK		(0xf<<4)
 #define AMDETH_FLG_RX_MODE(flagword)	((flagword)&AMDETH_FLG_RX_MODE_MSK)
+#define AMDETH_FLG_RX_MODE_MAX		AMDETH_FLG_RX_MODE_SYNC
 
 /* RX unused / disabled */
 #define AMDETH_FLG_RX_MODE_OFF		(0<<4)
@@ -108,6 +115,18 @@ amdEthInit(AmdEthDev *d, int instance, int flags, int n_rx_desc, int n_tx_desc);
 /* allow retries / collisions when sending */
 #define AMDETH_FLG_DO_RETRY			(1<<10)
 
+/* use ethernet headers rather than 802.2/snap headers */
+#define AMDETH_FLG_HDR_ETHERNET		(1<<11)
+
+/* disable some more strict 'real-time' constraints
+ * (might be beneficial if operating on a normal LAN
+ * for testing purposes). E.g., in 'real-time' mode
+ * TX deferrals due to collisions are considered errors.
+ * Also, letting the chip poll for work is disabled
+ * in real-time mode.
+ */
+#define AMDETH_FLG_RT_DIS			(1<<12)
+
 /* stop and release a device
  * RETURNS: 0 on success, -1 on error (invalid d pointer)
  */
@@ -116,7 +135,7 @@ amdEthCloseDev(AmdEthDev d);
 
 /* obtain the size of the (opaque) snap header */
 int
-amdEthGetHeaderSize();
+amdEthGetHeaderSize(AmdEthDev d);
 
 /* initialize an ethernet/snap header
  *  - if dst!= 0, fill in the destination address
@@ -128,11 +147,23 @@ amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d);
 
 /* send a packet with a header. If no header is specified
  * (NULL), use the default broadcast header.
+ *
+ * 'header' can also be AMDETH_TX_HEADER_NONE in order to
+ * omit the header (it is then assumed the 'payload' already
+ * contains a header).
  */
+#define AMDETH_TX_HEADER_NONE ((EtherHeader)-1)
 
 /* send a packet */
 int
 amdEthSendPacket(AmdEthDev d, EtherHeader header, void *payload, int size);
+
+/* send a packet and obtain the old buffer;
+ * if a header had been provided then a pointer to the header
+ * is returned - otherwise a pointer to the payload.
+ */
+int
+amdEthSendPacketSwp(AmdEthDev d, EtherHeader header, void **payload, int size);
 	
 /* update tx statistics from buffer descriptors; pass i==-1 */
 int amdEthUpdateTxStats(AmdEthDev d, unsigned i);
