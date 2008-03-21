@@ -37,8 +37,6 @@
 #ifdef HAVE_LIBBSPEXT
 #include <bsp/bspExt.h>
 #endif
-typedef unsigned int  pci_ulong;
-typedef unsigned char pci_ubyte;
 
 #ifndef PCI_MEM_BASE
 #define PCI_MEM_BASE 0
@@ -64,6 +62,13 @@ typedef unsigned char pci_ubyte;
 #define pciConfigOutByte pci_write_config_byte
 #define pciConfigInLong pci_read_config_dword
 #define pciConfigInByte pci_read_config_byte
+
+#if ISMINVERSION(4,8,0)
+typedef uint32_t      pci_ulong;
+#else
+typedef unsigned int  pci_ulong;
+#endif
+typedef unsigned char pci_ubyte;
 
 #elif defined(__vxworks)
 #include <vxWorks.h>
@@ -1254,7 +1259,7 @@ AmdEthDev	d;
 		WCSR(76, ((-(long)d->nRdesc) & 0xffff)); /* RX ring length */
 		WCSR(49, 0); /* default RX polling interval */
 		/* transmitter ring */
-		printf("TSILL tdesc is at %8p (PCI 0x%08x)\n",d->tdesc,LOCAL2PCI(d->tdesc));
+		printf("TSILL tdesc is at %8p (PCI 0x%08lx)\n",d->tdesc,(unsigned long)LOCAL2PCI(d->tdesc));
 		d->tidx = 0;
 		WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
 		WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
