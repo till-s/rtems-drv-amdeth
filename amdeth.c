@@ -14,6 +14,10 @@
  * the 'address' register setting across interrupts.
  */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #include <assert.h>
 #include <stdio.h>
 
