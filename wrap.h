@@ -295,7 +295,7 @@ pTaskSpawn(char *name, int prio, int stacksize, int fpTask,
 #error "I don't know how to spawn a task on this OS"
 #endif
 #ifdef DEBUG
-	MY_PRINTF("Got ID 0x%08x\n",*ptask);
+	MY_PRINTF("Got ID 0x%08lx\n",(unsigned long)*ptask);
 #endif
 	return 0;
 errout:
