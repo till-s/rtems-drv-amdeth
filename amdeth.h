@@ -115,8 +115,16 @@ amdEthInit(AmdEthDev *d, int instance, int flags, int n_rx_desc, int n_tx_desc);
 /* allow retries / collisions when sending */
 #define AMDETH_FLG_DO_RETRY			(1<<10)
 
+#define AMDETH_FLG_HDR_TYPE_MASK    (7<<11)
+
+#define AMDETH_FLG_HDR_SNAP			(0<<11)
+
 /* use ethernet headers rather than 802.2/snap headers */
 #define AMDETH_FLG_HDR_ETHERNET		(1<<11)
+/* IP header (w/o options)                             */
+#define AMDETH_FLG_HDR_IP           (2<<11)
+/* UDP header (w/o IP options)                         */
+#define AMDETH_FLG_HDR_UDP          (3<<11)
 
 /* disable some more strict 'real-time' constraints
  * (might be beneficial if operating on a normal LAN
@@ -129,9 +137,16 @@ amdEthInit(AmdEthDev *d, int instance, int flags, int n_rx_desc, int n_tx_desc);
 
 /* stop and release a device
  * RETURNS: 0 on success, -1 on error (invalid d pointer)
+ *
+ * An optional 'cleanup' callback function may be specified
+ * which is called on all non-NULL tx- and rx- ring entries.
+ * This is useful for releasing resources when the device
+ * is shutting down.
+ * The 'tx' argument is nonzero when the TX-ring is cleaned
+ * and zero when the RX-ring is cleaned.
  */
 int
-amdEthCloseDev(AmdEthDev d);
+amdEthCloseDev(AmdEthDev d, void (*cleanup)(int tx, void *buf_p, void *closure), void *closure);
 
 /* obtain the size of the (opaque) snap header */
 int
@@ -230,6 +245,25 @@ void
 amdEthSuspend(AmdEthDev d);
 void
 amdEthResume(AmdEthDev d);
+
+void
+amdEthMcFilterClear(AmdEthDev d);
+
+/* Add mac-address to multicast filter hash table.
+ * NOTE: an internal reference-count is kept so that
+ *       it is OK to add the same address (or one
+ *       that aliases to another) multiple times.
+ */
+void
+amdEthMcFilterAdd(AmdEthDev d, unsigned char *mac_addr);
+
+/*
+ * Decrement reference count and delete mac-address
+ * from multicast filter hash table when it reaches
+ * zero.
+ */
+void
+amdEthMcFilterDel(AmdEthDev d, unsigned char *mac_addr);
 
 #endif
 

@@ -1,0 +1,16 @@
+ 20090827 (T.S)
+ * amdeth.h, amdeth.c:
+   o Added support for the 79970 device (emulated by qemu) and
+     handling of qemu 'quirks' (bugs).
+   o Added support for IP and UDP 'header types' (basically to
+     let the driver know how long the buffer attached to the
+     first descriptor slot is.
+   o Added work-around for zero-length header. The single
+     buffer is 'distributed' into two descriptors; the first
+     one pointing at the head, the second one at some offset...
+   o Added 'cleanup' function pointer argument to amdEthCloseDev()
+     (***BREAKING API***). This can be used to release buffer
+     resources when the driver is shut down.
+   o Added support for multicast filter.
+ 20090827 (T.S)
+ * ChangeLog: added.

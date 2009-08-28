@@ -68,16 +68,25 @@
 #define pciConfigInByte pci_read_config_byte
 
 #if ISMINVERSION(4,8,0)
-typedef uint32_t      pci_ulong;
+typedef uint32_t       pci_ulong;
+typedef uint32_t       ame_u32;
+typedef uint16_t       ame_u16;
+typedef uint8_t        ame_u8;
 #else
-typedef unsigned int  pci_ulong;
+typedef unsigned int   pci_ulong;
+typedef unsigned int   ame_u32;
+typedef unsigned short ame_u16;
+typedef unsigned char  ame_u8;
 #endif
 typedef unsigned char pci_ubyte;
 
 #elif defined(__vxworks)
 #include <vxWorks.h>
-typedef unsigned long pci_ulong;
-typedef unsigned char pci_ubyte;
+typedef unsigned long  pci_ulong;
+typedef unsigned char  pci_ubyte;
+typedef unsigned int   ame_u32;
+typedef unsigned short ame_u16;
+typedef unsigned char  ame_u8;
 //#define PCI_VENDOR_ID_AMD	0x1022
 //#define PCI_DEVICE_ID_AMD_LANCE	0x2000
 #define PCI2LOCAL(pciaddr) ((pci_ulong)(pciaddr))
@@ -156,6 +165,19 @@ static inline unsigned long rdle(unsigned long *addr)
 									 * If ASEL==0, PORTSEL bits define port.
 									 */
 #define BCR2_I2C_N0			(1<<0)	/* 975 only */
+
+#define BCR4_LEDOUT			(1<<15)
+#define BCR4_LEDPOL			(1<<14)
+#define BCR4_LEDDIS			(1<<13)
+
+#define BCR4_FDLSE			(1<< 8)
+#define BCR4_PSE			(1<< 7)
+#define BCR4_LNKSTE			(1<< 6)
+
+#define BCR9_FDEN			(1<<0)
+#define BCR9_AUIFD			(1<<1)
+
+#define BCR9_SETUP_970		(BCR9_FDEN | BCR9_AUIFD)
 
 #define BCR19_PVALID		(1<<15) /* status: EEPROM (detected and contents) valid */
 #define BCR19_PREAD			(1<<14)	/* EEPROM read command bit */
@@ -268,7 +290,9 @@ static inline unsigned long rdle(unsigned long *addr)
 #define CSR15_PROM			(1<<15) /* promiscuous mode */
 #define CSR15_DRCVBC		(1<<14)	/* disable receive broadcast */
 #define CSR15_DFRCVPA		(1<<13)	/* disable receive physical address */
-#define CSR15_PORTSEL		(3<<7)	/* select network medium (must be 11b) */
+#define CSR15_PORTSEL_973	(3<<7)	/* select network medium (must be 11b) */
+#define CSR15_PORTSEL_970	(1<<7)	/* select network medium (must be 11b) */
+#define CSR15_PORTSEL(d)    (PARTID_AMD79970 == PARTID(d) ? CSR15_PORTSEL_970 : CSR15_PORTSEL_973)
 #define CSR15_INTL			(1<<6)	/* internal loopback */
 #define CSR15_DRTY			(1<<5)	/* disable retry */
 #define CSR15_FCOLL			(1<<4)	/* force collision */
@@ -385,11 +409,29 @@ typedef union TxBufDescU_ {
 #define TXDESC_CSR2_RTRY	(1<<26)		/* retry error (more than 16 attempts) */
 #define TXDESC_CSR2_TRC_MSK	(15)		/* mask for the retry count */
 
+typedef struct IniBlk32Rec_ {
+	unsigned long		dlen_csr15modeLE;
+	unsigned long       padrLoLE;
+	unsigned long       padrHiLE;
+	unsigned long       ladrfLoLE;
+	unsigned long       ladrfHiLE;
+	unsigned long       rdraLE;
+	unsigned long       tdraLE;
+} IniBlk32Rec;
+
 #define REGLOCK(d)   pSemWait(&(d)->mutex)
 #define REGUNLOCK(d) pSemPost(&(d)->mutex)
 
 #define MAX_RDESC	8
 #define MAX_TDESC	8
+
+#define NUM_MC_HASHES	64
+
+#define PARTID_AMD79970	0x2621003
+#define PARTID_AMD79973	0x2625003
+#define PARTID_AMD79975	0x2627003
+/* mask silicon version */
+#define PARTID(d) ((d)->partid & 0x0fffffff)
 
 /* TODO add mutex for driver access */
 typedef struct AmdEthDevRec_ {
@@ -435,7 +477,9 @@ typedef struct AmdEthDevRec_ {
 		unsigned long	sysError;
 		unsigned long	miiIrqs;
 		unsigned long	linkStat;
-	}		stats;
+	}			stats;
+	ame_u16		mc_refcnt[NUM_MC_HASHES];
+	ame_u32		partid;
 } AmdEthDevRec;
 
 #ifdef __PPC__
@@ -479,7 +523,7 @@ unsigned long roundtrip;
 #else
 #define CSR7_SETUP(d)	(CSR7_RTFLAGS(d))
 #endif
-#define CSR15_SETUP(d)	(CSR15_RTFLAGS(d) | CSR15_PORTSEL)
+#define CSR15_SETUP(d)	(CSR15_RTFLAGS(d) | CSR15_PORTSEL(d))
 #define CSR100_SETUP(d) (CSR100_RTFLAGS(d))
 
 #ifndef HAVE_LIBBSPEXT
@@ -633,9 +677,42 @@ ModIndReg(
 #define RCSR(idx) \
 	ReadIndReg(idx,rap,rdp)
 
-#define GET_LINK_STAT() (WBCR(33, ((0x1e<<5)|24)),RBCR(34))
+#define GET_LINK_STAT(d) \
+	(PARTID_AMD79970 == PARTID(d) ?           \
+		 (   ((RBCR(4) & BCR4_LEDOUT) ? ANR24_LINK_UP : 0) \
+           | ((RBCR(9) & BCR9_FDEN)   ? ANR24_FULLDUP : 0) \
+         )                                    \
+	:                                         \
+		 (WBCR(33, ((0x1e<<5)|24)),RBCR(34))  \
+	)
 
 static char *dn="Amd Ethernet:";
+
+static ame_u16
+amd_stop(AmdEthDev d)
+{
+RAPDECL;
+RDPDECL;
+unsigned long flags;
+ame_u16       csr0_iena;
+
+	rtems_interrupt_disable(flags);
+	
+	csr0_iena = RCSR(0);
+	WCSR(0, CSR0_STOP);
+	rtems_interrupt_enable(flags);
+
+	return csr0_iena & CSR0_IENA;
+}
+
+static void
+amd_start(AmdEthDev d, ame_u16 csr0_iena)
+{
+RAPDECL;
+RDPDECL;
+
+	WCSR(0, csr0_iena | CSR0_STRT);
+}
 
 static void
 amdEthPrintAddr(AmdEthDev d, FILE *f, char *header)
@@ -661,28 +738,43 @@ amdEthSetSrc(EtherHeader h, AmdEthDev d)
 void
 amdEthHeaderInit(EtherHeader h, char *dst, AmdEthDev d)
 {
+uint16_t hdrt;
+
 	/* Only initialize the addresses if they specify a dst/src */
 	if (dst) {
 		memcpy(h->dst,dst,sizeof(h->dst));
 	}
 	if (d)
 		amdEthSetSrc(h,d);
-	if ( ! (d->flags & AMDETH_FLG_HDR_ETHERNET) ) {
-		h->len=htons(0);
-		h->llc8022.dsap = 0xAA;
-		h->llc8022.ssap = 0xAA;
-		h->llc8022.ctrl = 0x3;
-		h->snap.org[0]  = 0x08; /* Stanford OUI */
-		h->snap.org[1]  = 0x00;
-		h->snap.org[2]  = 0x56;
-		h->snap.type    = htons(0x805b); /* stanford V kernel ethernet type */
+	switch ( (d->flags & AMDETH_FLG_HDR_TYPE_MASK) ) {
+		default:
+		case AMDETH_FLG_HDR_SNAP:
+			hdrt  = 0;
+			h->len=htons(hdrt);
+			h->llc8022.dsap = 0xAA;
+			h->llc8022.ssap = 0xAA;
+			h->llc8022.ctrl = 0x3;
+			h->snap.org[0]  = 0x08; /* Stanford OUI */
+			h->snap.org[1]  = 0x00;
+			h->snap.org[2]  = 0x56;
+			h->snap.type    = htons(0x805b); /* stanford V kernel ethernet type */
+		return; /* Always set header */
+
+		case AMDETH_FLG_HDR_ETHERNET:
+			hdrt = 0x805b;
+		break;
+
+		case AMDETH_FLG_HDR_IP:
+		case AMDETH_FLG_HDR_UDP:
+			hdrt = 0x800;
+		break;
+	}
+
+	if ( h == &d->theader ) {
+		/* 'len' used for 'type' in plain ethernet headers */
+		h->len = htons(hdrt);
 	} else {
-		if ( h == &d->theader ) {
-			/* 'len' used for 'type' in plain ethernet headers */
-			h->len = htons(0x805b);
-		} else {
-			/* setting up the 'type' is responsability of the user */
-		}
+		/* setting up the 'type' is responsability of the user */
 	}
 }
 
@@ -729,7 +821,8 @@ RDPDECL;
 	wrle(rxstat | RXDESC_STAT_OWN, &d->rdesc[idx].STYLE.statLE);
 	/* yield the descriptor before enforcing a poll */
 	iobarrier_rw();
-	RMWCSR( 7, ~CSR7_IRQ_STAT, CSR7_RDMD );
+	if ( PARTID_AMD79970 != PARTID(d) )
+		RMWCSR( 7, ~CSR7_IRQ_STAT, CSR7_RDMD );
 }
 
 #ifdef __PPC__
@@ -782,6 +875,9 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 			 */
 			ISR_PROF_INC();
 			d->stats.irqs++;
+#ifdef DEBUG
+printk("IRQ (csr0: 0x%08x)\n", csr0);
+#endif
 #if 0
 			if ( csr0 & CSR0_MISS ) {
 				/* missed frame - we use the hardware counter but action
@@ -800,7 +896,7 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 		 * released the descriptor. (NO)
 		 */
 #endif
-			if ( csr0 & CSR0_RINT ) {
+			if ( csr0 & (CSR0_RINT|CSR0_MISS) ) {
 
 				assert( d->rmode != AMDETH_FLG_RX_MODE_POLL );
 
@@ -812,6 +908,9 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 					unsigned long now;
 					__asm__ __volatile__("mftb %0":"=r"(now));
 					roundtrip = now-roundtrip;
+#endif
+#ifdef DEBUG
+printk("Got something (dstat = 0x%08x)\n",dstat);
 #endif
 
 					switch ( d->rmode ) {
@@ -842,6 +941,9 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 					}
 					d->widx = ++d->widx % d->nRdesc;
 				}
+#ifdef DEBUG
+printk("Got last (dstat = 0x%08x)\n",dstat);
+#endif
 			}
 			ISR_PROF_INC();
 
@@ -870,17 +972,19 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 			ISR_PROF_INC();
 
 #ifndef AUTOPOLL_BROKEN
-			tmp = RCSR(7);
-			if ( tmp & CSR7_MAPINT ) {
-				unsigned long	savedMIIAR;
-				BDPDECL;
-				/* clear raised flag */
-				WCSR(7, tmp);
-				d->stats.miiIrqs++;
-				savedMIIAR = RBCR(33);
-				/* get summary status */
-				d->stats.linkStat = GET_LINK_STAT();
-				WBCR(33, savedMIIAR);
+			if ( PARTID_AMD79970 != PARTID(d) ) {
+				tmp = RCSR(7);
+				if ( tmp & CSR7_MAPINT ) {
+					unsigned long	savedMIIAR;
+					BDPDECL;
+					/* clear raised flag */
+					WCSR(7, tmp);
+					d->stats.miiIrqs++;
+					savedMIIAR = RBCR(33);
+					/* get summary status */
+					d->stats.linkStat = GET_LINK_STAT(d);
+					WBCR(33, savedMIIAR);
+				}
 			}
 #endif
 		}
@@ -1043,6 +1147,9 @@ char					*obuf;
 
 			/* no need to lock; driver task doesn't touch stats in this mode */
 
+#ifdef DEBUG
+printk("ReceivPacket (sync)\n");
+#endif
 			if ( ! (rval = updateRxStats(d, rdle(&d->rdesc[d->ridx].STYLE.statLE))) ) {
 				rval = ((int)rdle(&d->rdesc[d->ridx].STYLE.mcntLE)) & RXDESC_MCNT_MASK;
 
@@ -1081,7 +1188,9 @@ char					*obuf;
 				RAPDECL;
 				RDPDECL;
 				/* activate RX auto polling ? */
-				RMWCSR(7, ~(CSR7_RXDPOLL|CSR7_IRQ_STAT), 0);
+				if ( PARTID_AMD79970 != PARTID(d) ) {
+					RMWCSR(7, ~(CSR7_RXDPOLL|CSR7_IRQ_STAT), 0);
+				}
 				for ( i = 0; i < d->nRdesc; i++ ) {
 					yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK), i);
 				}
@@ -1115,13 +1224,30 @@ amdEthAutoCbRegister(AmdEthDev d, AmdEthAutoRxCallback callback, void *udata)
 	return 0;
 }
 
+static int ld2floor(unsigned n)
+{
+unsigned c,rval;
+
+	for ( c=512, rval=9; c; c>>=1, rval-- ) {
+		if ( n >= c )
+			return rval;
+	}
+	return 0;
+}
+
+#define QEMU_BUG_NEED_INIBLK    (1<<0)
+#define QEMU_BUG_BAD_RING_LEN	(1<<1)
+
 int
 amdEthInit(AmdEthDev *pd, int instance, int flags, int n_rx_desc, int n_tx_desc)
 {
-int		bus,dev,fun,i,irqLine=-1;
-pci_ulong	tmp;
-pci_ubyte	tmpb;
-AmdEthDev	d;
+int		                bus,dev,fun,i,irqLine=-1;
+pci_ulong	            tmp,csr15,ini0;
+pci_ubyte	            tmpb;
+AmdEthDev	            d;
+IniBlk32Rec	            ini;
+volatile unsigned char *pch;
+int                     qemu_bug = 0;
 
 	/* for now, allow only one instance */
 	assert(instance < NumberOf(devices));
@@ -1147,12 +1273,17 @@ AmdEthDev	d;
 		fprintf(stderr,"Only %i RX descriptors supported\n", NumberOf(d->rdesc));
 		return AMDETH_ERROR;
 	}
+
+	assert(((unsigned long)d->rdesc & 15) == 0);
+
 	d->nRdesc = n_rx_desc ? n_rx_desc : 1;
 
 	if ( (unsigned)n_tx_desc > NumberOf(d->tdesc) ) {
 		fprintf(stderr,"Only %i TX descriptors supported\n", NumberOf(d->tdesc));
 		return AMDETH_ERROR;
 	}
+	assert(((unsigned long)d->tdesc & 15) == 0);
+
 	d->nTdesc = 2 * (n_tx_desc ? n_tx_desc : 1);
 
 	/* scan PCI bus */
@@ -1204,23 +1335,101 @@ AmdEthDev	d;
 
 		WBCR(20, STYLEFLAGS);
 
-		/* we really assume that there is an eeprom present providing some
-		 * initialization.
-		 * Note that we also assume that sufficient time has expired
-		 * since HW reset until execution reaches this point for the
-		 * controller to have read the EEPROM.
-		 * Also, we assume that the EEPROM contains reasonable defaults
-		 * for some BCRs (e.g., BCR18 enabling PCI burst modes)...
-	 	 */
-		{ register unsigned long lanceBCR19;
-		lanceBCR19=RBCR(19);
-		assert( lanceBCR19 & BCR19_PVALID );
+		/* Check for 79970 (as used e.g., by qemu) */
+		d->partid = RCSR(88);
+
+		fprintf(stderr,"Part ID: 0x%08lx\n",(unsigned long)d->partid);
+
+		if ( PARTID_AMD79970 == PARTID(d) ) {
+			/* no BCR19 */
+
+			/* assume this is QEMU -- ring base address and
+			 * length can only be programmed via ini-block
+			 * due to bugs :-(
+			 */
+			qemu_bug |= QEMU_BUG_NEED_INIBLK;
+		} else {
+
+			/* we really assume that there is an eeprom present providing some
+			 * initialization.
+			 * Note that we also assume that sufficient time has expired
+			 * since HW reset until execution reaches this point for the
+			 * controller to have read the EEPROM.
+			 * Also, we assume that the EEPROM contains reasonable defaults
+			 * for some BCRs (e.g., BCR18 enabling PCI burst modes)...
+			 */
+			register unsigned long lanceBCR19;
+			lanceBCR19=RBCR(19);
+			assert( lanceBCR19 & BCR19_PVALID );
 		}
 
 #if 0 /* not yet ready - unsure if really needed */
-		/* set LOLATRX (requires SRAM > 0, CSR127(RPA) ) */
-		RMWBCR( 27, ~0, BCR27_LOLATRX);
+		if ( PARTID_AMD79970 != PARTID(d) ) {
+			/* set LOLATRX (requires SRAM > 0, CSR127(RPA) ) */
+			RMWBCR( 27, ~0, BCR27_LOLATRX);
+		}
 #endif
+
+		/* switch off receiver ? */
+		csr15 = CSR15_SETUP(d);
+		if ( d->tmode == AMDETH_FLG_TX_MODE_OFF ) {
+			csr15 |= CSR15_DTX;
+		}
+		if ( d->rmode == AMDETH_FLG_RX_MODE_OFF ) {
+			csr15 |= CSR15_DRX;
+		}
+		if ( flags & AMDETH_FLG_NOBCST ) {
+			csr15 |= CSR15_DRCVBC;
+		}
+		if ( flags & AMDETH_FLG_DO_RETRY ) {
+			csr15 &= ~CSR15_DRTY;
+		}
+
+		if ( (QEMU_BUG_NEED_INIBLK & qemu_bug) ) {
+			tmp = ld2floor(d->nRdesc);
+
+			ini0 = (tmp << 20) | csr15;
+
+			tmp = ld2floor(d->nTdesc);
+
+			ini0 |= (tmp << 28);
+
+			wrle(ini0, &ini.dlen_csr15modeLE);
+
+			pch = d->baseAddr->aprom;
+			tmp = (pch[3] << 24) | (pch[2] << 16) | (pch[1] << 8) | pch[0];
+			wrle(tmp, &ini.padrLoLE);
+			tmp = (pch[5] << 8) | pch[4];
+			wrle(tmp, &ini.padrHiLE);
+
+			wrle(0, &ini.ladrfLoLE);
+			wrle(0, &ini.ladrfHiLE);
+
+			wrle(LOCAL2PCI(d->rdesc), &ini.rdraLE);
+			wrle(LOCAL2PCI(d->tdesc), &ini.tdraLE);
+
+			WCSR( 1,  LOCAL2PCI(&ini)        & 0xffff);
+			WCSR( 2, (LOCAL2PCI(&ini) >> 16) & 0xffff);
+
+			WCSR( 0, CSR0_SETUP | CSR0_IRQ_STAT | CSR0_INIT );
+
+			while ( 0 == (RCSR(0) & CSR0_IDON) )
+				/* poll */;
+
+			WCSR( 0, CSR0_SETUP | CSR0_IRQ_STAT | CSR0_STOP );
+
+			/* Work around QEMU bug -- descriptor length
+			 * is stored/used directly instead of 2's complement
+			 * of CSR 76/78
+			 */
+			tmp = 1 << ((ini0 >> 20) & 0xf);
+			if ( (RCSR(76) & 0xffff) == tmp ) {
+				qemu_bug |= QEMU_BUG_BAD_RING_LEN;
+				d->nRdesc = tmp;
+				fprintf(stderr,"Enabling QEMU-bug bad ring-length workaround\n");
+				d->nTdesc = 1 << ((ini0 >> 28) & 0xf);
+			}
+		}
 
 		/* clear interrupt and mask unneeded sources */
 		WCSR(0,  CSR0_SETUP | CSR0_IRQ_STAT);
@@ -1231,43 +1440,44 @@ AmdEthDev	d;
 
 		WCSR(5,  CSR5_SETUP | CSR5_IRQ_STAT);
 
-		WCSR(7, CSR7_SETUP(d) | CSR7_IRQ_STAT);
+		if ( PARTID_AMD79970 != PARTID(d) ) {
+			WCSR(7, CSR7_SETUP(d) | CSR7_IRQ_STAT);
+		}
 
-		/* switch off receiver ? */
-		tmp = CSR15_SETUP(d);
-		if ( d->tmode == AMDETH_FLG_TX_MODE_OFF ) {
-			tmp |= CSR15_DTX;
+		if ( ! (QEMU_BUG_NEED_INIBLK & qemu_bug) ) {
+			WCSR(15, csr15);
+			/* clear logical address filters */
+			WCSR(8, 0);
+			WCSR(9, 0);
+			WCSR(10, 0);
+			WCSR(11, 0);
 		}
-		if ( d->rmode == AMDETH_FLG_RX_MODE_OFF ) {
-			tmp |= CSR15_DRX;
-		}
-		if ( flags & AMDETH_FLG_NOBCST ) {
-			tmp |= CSR15_DRCVBC;
-		}
-		if ( flags & AMDETH_FLG_DO_RETRY ) {
-			tmp &= ~CSR15_DRTY;
-		}
-		WCSR(15, tmp);
 
-		/* clear logical address filters */
-		WCSR(8, 0);
-		WCSR(9, 0);
-		WCSR(10, 0);
-		WCSR(11, 0);
+		for ( i = 0; i<NUM_MC_HASHES; i++ )
+			d->mc_refcnt[i] = 0;
+
 		/* physical address is read from EEPROM */
 		/* receiver ring */
 		d->ridx = 0;
 		d->widx = 0;
-		WCSR(24, ((LOCAL2PCI(d->rdesc) &0xffff)));
-		WCSR(25, ((LOCAL2PCI(d->rdesc) >> 16)&0xffff));
-		WCSR(76, ((-(long)d->nRdesc) & 0xffff)); /* RX ring length */
+		if ( ! (QEMU_BUG_NEED_INIBLK & qemu_bug) ) {
+			WCSR(24, ((LOCAL2PCI(d->rdesc) &0xffff)));
+			WCSR(25, ((LOCAL2PCI(d->rdesc) >> 16)&0xffff));
+		}
+		if ( ! (QEMU_BUG_BAD_RING_LEN & qemu_bug) )
+			WCSR(76, ((-(long)d->nRdesc) & 0xffff)); /* RX ring length */
 		WCSR(49, 0); /* default RX polling interval */
 		/* transmitter ring */
-		printf("TSILL tdesc is at %8p (PCI 0x%08lx)\n",d->tdesc,(unsigned long)LOCAL2PCI(d->tdesc));
+		fprintf(stderr,"tdesc is at %8p (PCI 0x%08lx)\n",d->tdesc,(unsigned long)LOCAL2PCI(d->tdesc));
+		fprintf(stderr,"rdesc is at %8p (PCI 0x%08lx)\n",d->rdesc,(unsigned long)LOCAL2PCI(d->rdesc));
 		d->tidx = 0;
-		WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
-		WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
-		WCSR(78, ((-(long)d->nTdesc) & 0xffff)); /* TX ring length */
+		d->tidx = 0;
+		if ( ! (QEMU_BUG_NEED_INIBLK & qemu_bug) ) {
+			WCSR(30, ((LOCAL2PCI(d->tdesc) &0xffff)));
+			WCSR(31, ((LOCAL2PCI(d->tdesc) >> 16)&0xffff));
+		}
+		if ( ! (QEMU_BUG_BAD_RING_LEN & qemu_bug) )
+			WCSR(78, ((-(long)d->nTdesc) & 0xffff)); /* TX ring length */
 		WCSR(47, 0); /* default TX polling interval */
 
 		WCSR(100,CSR100_MERRTO_MASK & CSR100_SETUP(d));
@@ -1311,12 +1521,22 @@ AmdEthDev	d;
 			RMWBCR( 2, ~BCR2_DISSCR_SFEX, 0 );
 		}
 
+		/* The only way to check link status on the 970 seems
+		 * to be by means of the LED output ???
+		 */
+		if ( PARTID_AMD79970 == PARTID(d) ) {
+			/* This possibly enables full-duplex mode */
+			WBCR(9, BCR9_SETUP_970);
+
+			WBCR(4, BCR4_LNKSTE | ((RBCR(9) & BCR9_FDEN) ? BCR4_FDLSE : 0) );
+		}
+
 #ifndef AUTOPOLL_BROKEN
 		/* Enable MII auto polling */
 		RMWBCR( 32, ~0, BCR32_APEP );
 #endif
 		/* obtain initial link status */
-		d->stats.linkStat = GET_LINK_STAT();
+		d->stats.linkStat = GET_LINK_STAT(d);
 
 		/* finally, start the device */
 		WCSR(0, CSR0_SETUP | CSR0_STRT);
@@ -1475,6 +1695,7 @@ register unsigned long csr1OR;
 int l = amdEthGetHeaderSize(d);
 int i = d->tidx;
 void *obuf;
+void *nbuf;
 
 	if (!d) d=&devices[0];
 
@@ -1520,7 +1741,7 @@ void *obuf;
 		l = 0;
 		h = 0;
 	}
-	if ( h && !(d->flags & AMDETH_FLG_HDR_ETHERNET) )
+	if ( h && AMDETH_FLG_HDR_SNAP == (d->flags & AMDETH_FLG_HDR_TYPE_MASK) )
 		h->len = htons(l - 14  + size);
 	/* clear csr2 */
 	wrle(0,
@@ -1533,10 +1754,26 @@ void *obuf;
 	if ( !obuf || obuf == &d->theader )
 		obuf = (void*)PCI2LOCAL(rdle(&d->tdesc[i+1].STYLE.tbadrLE));
 
+	nbuf = *pdata;
+
+	/* work-around; at least QEMU doesn't accept zero-length
+	 * descriptors (even though the 970 manual says they are
+	 * OK as long as STP is not set.
+	 *
+ 	 * Simply pass the ethernet header in the first one and
+	 * adjust the data area up.
+	 */
+	if ( ! h ) {
+		h = nbuf;
+		l = 14;
+		nbuf += 14;
+		size -= 14;
+	}
+
 	/* set buffer address of first bd */
 	wrle(LOCAL2PCI(h),&d->tdesc[i+0].STYLE.tbadrLE);
 	/* set buffer address of second bd */
-	wrle(LOCAL2PCI(*pdata), &d->tdesc[i+1].STYLE.tbadrLE);
+	wrle(LOCAL2PCI(nbuf), &d->tdesc[i+1].STYLE.tbadrLE);
 
 	*pdata = obuf;
 	/* setup csr1 of second bd */
@@ -1956,12 +2193,14 @@ int i;
 #endif
 }
 
-int amdEthCloseDev(AmdEthDev d)
+int amdEthCloseDev(AmdEthDev d, void (*cleanup)(int,void*,void*),void *closure)
 {
 RAPDECL;
 RDPDECL;
 unsigned long flags;
 int           retry;
+int           i;
+void          *obuf;
 
 	if ( d < devices || d >= devices + NumberOf(devices) ) {
 		fprintf(stderr,"Invalid device pointer\n");
@@ -2013,10 +2252,136 @@ int           retry;
 		bspExtRemoveSharedISR(d->irqLine, (void (*)(void*))amdEthIsr, d);
 	}
 #endif
+
+	/* Swipe the rings clean */
+	if ( cleanup ) {
+		for ( i=0; i<NumberOf(d->tdesc); i+=2 ) {
+			obuf = (void*)PCI2LOCAL(rdle(&d->tdesc[i+0].STYLE.tbadrLE));
+			if ( !obuf || obuf == &d->theader )
+				obuf = (void*)PCI2LOCAL(rdle(&d->tdesc[i+1].STYLE.tbadrLE));
+
+			if ( obuf )
+				cleanup(1, obuf, closure);
+		}
+		for ( i=0; i<NumberOf(d->rdesc); i++ ) {
+			obuf = (char*)PCI2LOCAL(rdle(&d->rdesc[i].STYLE.rbadrLE));
+			if ( obuf )
+				cleanup(0, obuf, closure);
+		}
+	}
+
 	memset(d,0,sizeof(*d)); /* mark slot free */
 	return 0;
 }
 
+int
+amdEthGetHeaderSize(AmdEthDev d)
+{
+	switch ( (d->flags & AMDETH_FLG_HDR_TYPE_MASK) ) {
+		case AMDETH_FLG_HDR_SNAP	:
+		default:
+		break;
+
+		case AMDETH_FLG_HDR_ETHERNET:   return 14;
+		case AMDETH_FLG_HDR_IP      :   return 14 + 20;
+		case AMDETH_FLG_HDR_UDP     :   return 14 + 20 + 8;
+	}
+
+	return sizeof(EtherHeaderRec);
+}
+
+void
+amdEthMcFilterClear(AmdEthDev d)
+{
+int i;
+ame_u16 iena;
+
+	REGLOCK(d);
+	{
+	RAPDECL;
+	RDPDECL;
+
+		iena = amd_stop(d);
+
+		WCSR(8, 0);
+		WCSR(9, 0);
+		WCSR(10, 0);
+		WCSR(11, 0);
+
+		amd_start(d, iena);
+
+		for ( i = 0; i<NUM_MC_HASHES; i++ )
+			d->mc_refcnt[i] = 0;
+
+	}
+	REGUNLOCK(d);
+}
+
+static int
+mc_addr_valid(ame_u8 *enaddr)
+{
+static const char bcst[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	return ( (0x01 & enaddr[0]) && memcmp(enaddr, bcst, sizeof(bcst)) );
+}
+
+static ame_u32
+mc_hash(ame_u8 *enaddr)
+{
+ame_u32 crc = 0xffffffff;
+int     i,j;
+#define CRCPOLY_LE 0xedb88320
+    for ( j=0; j<6; j++) {
+        crc ^= enaddr[j];
+        for ( i=0; i<8; i++ ) {
+            crc = (crc>>1) ^ ( (crc & 1) ? CRCPOLY_LE : 0 );
+        }
+    }
+    return (crc >> 26);
+}
+
+void
+amdEthMcFilterAdd(AmdEthDev d, unsigned char *mac_addr)
+{
+ame_u32 hash;
+ame_u32 off;
+ame_u16 iena;
+
+	if ( ! mc_addr_valid(mac_addr) )
+		return;
+	hash = mc_hash(mac_addr);
+	REGLOCK(d);
+	if ( 0 == d->mc_refcnt[hash]++ ) {
+		RAPDECL;
+		RDPDECL;
+		off = 8 + (hash >> 4);
+		iena = amd_stop(d);
+		RMWCSR(off, /*and mask*/~0, /*or mask*/ (1<<(hash & 0xf)));
+		amd_start(d, iena);
+	}
+	REGUNLOCK(d);
+}
+
+void
+amdEthMcFilterDel(AmdEthDev d, unsigned char *mac_addr)
+{
+ame_u32 hash;
+ame_u32 off;
+ame_u16 iena;
+
+	if ( ! mc_addr_valid(mac_addr) )
+		return;
+	hash = mc_hash(mac_addr);
+	REGLOCK(d);
+	if ( d->mc_refcnt[hash] > 0 && 0 == --d->mc_refcnt[hash] ) {
+		RAPDECL;
+		RDPDECL;
+		off = 8 + (hash >> 4);
+		iena = amd_stop(d);
+		RMWCSR(off, /*and mask*/ ~(1<<(hash & 0xf)), /* or mask */ 0);
+		amd_start(d, iena);
+	}
+	REGUNLOCK(d);
+}
 
 int
 _cexpModuleFinalize(void *mod)
@@ -2027,13 +2392,13 @@ AmdEthDev	d;
 #ifdef HAVE_LIBBSPEXT
 	for ( d=devices, i=0; i<NumberOf(devices); i++, d++ ) {
 		if ( d->baseAddr ) {
-			errs |= amdEthCloseDev(d);
+			errs |= amdEthCloseDev(d, 0, 0);
 		}
 	}
 #else
 	for ( i=0; i < NumberOf(insaneApiMap); i++) {
 		for ( d=insaneApiMap[i].device; d; d=d->next) {
-			errs |= amdEthCloseDev(d);
+			errs |= amdEthCloseDev(d, 0, 0);
 		}
 		/* uninstall ISR */
 		BSP_remove_rtems_irq_handler(&insaneApiMap[i].device->brokenbydesign);
@@ -2052,8 +2417,4 @@ AmdEthDev	d;
 	return errs;
 }
 
-int
-amdEthGetHeaderSize(AmdEthDev d)
-{
-	return d->flags & AMDETH_FLG_HDR_ETHERNET ? 14 : sizeof(EtherHeaderRec);
-}
+
