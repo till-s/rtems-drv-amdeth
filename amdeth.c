@@ -434,7 +434,7 @@ typedef struct AmdEthDevRec_ {
 		unsigned long	rxCollisionHi;
 		unsigned long	sysError;
 		unsigned long	miiIrqs;
-		unsigned long	linkStat;
+		volatile unsigned long	linkStat;
 	}		stats;
 } AmdEthDevRec;
 
@@ -2056,4 +2056,42 @@ int
 amdEthGetHeaderSize(AmdEthDev d)
 {
 	return d->flags & AMDETH_FLG_HDR_ETHERNET ? 14 : sizeof(EtherHeaderRec);
+}
+
+#define AMDETH_LINK_MSK_FD   1
+#define AMDETH_LINK_MSK_10   2
+#define AMDETH_LINK_MSK_100  4
+
+#define AMDETH_LINK_DOWN     0
+#define AMDETH_LINK_10_HD    2
+#define AMDETH_LINK_10_FD    3
+#define AMDETH_LINK_100_HD   4
+#define AMDETH_LINK_100_FD   5
+
+int
+amdEthLinkStatus(AmdEthDev d)
+{
+int           rval     = 0;
+unsigned long linkStat = d->stats.linkStat;
+
+	if ( ( linkStat & ANR24_LINK_UP ) ) {
+		rval |= ( linkStat & ANR24_SPEED_100 ) ? AMDETH_LINK_MSK_100 : AMDETH_LINK_MSK_10;
+		if ( ( linkStat & ANR24_FULLDUP ) )
+			rval |= AMDETH_LINK_MSK_FD;
+	}
+	return rval;
+}
+
+AmdEthDev
+amdEthGetDev(int inst)
+{
+AmdEthDev d;
+
+	if ( inst < 0 || inst >= NUM_ETH_DEVICES )
+		return 0;
+
+	d = & devices[inst];
+
+	/* return NULL if device is not initialized */
+	return d->baseAddr ? d : 0;
 }
