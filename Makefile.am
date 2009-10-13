@@ -16,5 +16,6 @@ amdeth_SOURCES          =
 amdeth_LDADD            = $(libamdEth_a_OBJECTS)
 amdeth_DEPENDENCIES     = $(libamdEth_a_OBJECTS)
 amdeth_LINK             = $(OBJLINK)
+libamdEth_a_CPPFLAGS    = $(AM_CPPFLAGS) -DTASK_DRIVEN
 
 include $(top_srcdir)/rtems.am
