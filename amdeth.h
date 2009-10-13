@@ -246,6 +246,22 @@ amdEthSuspend(AmdEthDev d);
 void
 amdEthResume(AmdEthDev d);
 
+#define AMDETH_LINK_MSK_FD   1
+#define AMDETH_LINK_MSK_10   2
+#define AMDETH_LINK_MSK_100  4
+
+#define AMDETH_LINK_DOWN     0
+#define AMDETH_LINK_10_HD    2
+#define AMDETH_LINK_10_FD    3
+#define AMDETH_LINK_100_HD   4
+#define AMDETH_LINK_100_FD   5
+
+int
+amdEthLinkStatus(AmdEthDev d);
+
+AmdEthDev
+amdEthGetDev(int inst);
+
 void
 amdEthMcFilterClear(AmdEthDev d);
 
