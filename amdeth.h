@@ -244,6 +244,11 @@ amdEthResume(AmdEthDev d);
 int
 amdEthLinkStatus(AmdEthDev d);
 
+typedef void (*AmdEthLinkCallback)(int linkStatus, void *closure);
+
+int
+amdEthLinkCbRegister(AmdEthDev d, AmdEthLinkCallback callback, void *closure);
+
 AmdEthDev
 amdEthGetDev(int inst);
 

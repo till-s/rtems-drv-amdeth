@@ -28,7 +28,6 @@
 
 #define NUM_ETH_DEVICES 4	/* how many devices our table supports */
 #define RT_DRIVER			/* whether to set some flags for real-time specific application */
-#define AUTOPOLL_BROKEN		/* I can't get media autopolling to work :-( */
 
 #ifdef __rtems__
 #include <rtems.h>
@@ -413,6 +412,8 @@ typedef struct AmdEthDevRec_ {
 	unsigned	rmode, tmode;
 	AmdEthAutoRxCallback cb;
 	void		*udata;
+	AmdEthLinkCallback lcb;
+	void		*l_udata;
 	struct		{
 		unsigned long	txPackets;	/* # packets sent */
 		unsigned long	rxPackets;	/* # packets received */
@@ -473,12 +474,8 @@ unsigned long roundtrip;
 	| CSR4_APAD_XMT     \
 	| CSR4_ASTRP_RCV	\
 	)
-#define CSR5_SETUP	(CSR5_TOKINTD | CSR5_EXDINTE | CSR5_SINTE)
-#ifndef AUTOPOLL_BROKEN
+#define CSR5_SETUP		(CSR5_TOKINTD | CSR5_EXDINTE | CSR5_SINTE)
 #define CSR7_SETUP(d)	(CSR7_RTFLAGS(d) | CSR7_MAPINTE)
-#else
-#define CSR7_SETUP(d)	(CSR7_RTFLAGS(d))
-#endif
 #define CSR15_SETUP(d)	(CSR15_RTFLAGS(d) | CSR15_PORTSEL)
 #define CSR100_SETUP(d) (CSR100_RTFLAGS(d))
 
@@ -633,6 +630,14 @@ ModIndReg(
 #define RCSR(idx) \
 	ReadIndReg(idx,rap,rdp)
 
+/* NOTE: (especially in interrupt driven mode!)
+ *       reading the MII data register is *extremely*
+ *       slow. Takes ~30us!
+ *       This is the main reason why we really want
+ *       to read the link status only when it changes
+ *       (disruption is probably more tolerable if
+ *       there is a major problem due to link failure).
+ */
 #define GET_LINK_STAT() (WBCR(33, ((0x1e<<5)|24)),RBCR(34))
 
 static char *dn="Amd Ethernet:";
@@ -869,7 +874,6 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 			}
 			ISR_PROF_INC();
 
-#ifndef AUTOPOLL_BROKEN
 			tmp = RCSR(7);
 			if ( tmp & CSR7_MAPINT ) {
 				unsigned long	savedMIIAR;
@@ -879,10 +883,30 @@ unsigned long			isrProf[ISR_PROF_DEPTH];
 				d->stats.miiIrqs++;
 				savedMIIAR = RBCR(33);
 				/* get summary status */
+
+				/* NOTE: (especially in interrupt driven mode!)
+				 *       reading the MII data register is *extremely*
+				 *       slow. Takes ~30us!
+				 *       This is the main reason why we really want
+				 *       to read the link status only when it changes
+				 *       (disruption is probably more tolerable if
+				 *       there is a major problem due to link failure).
+				 */
 				d->stats.linkStat = GET_LINK_STAT();
-				WBCR(33, savedMIIAR);
+
+				/* NOTE: the reason AUTOPOLL did not work
+				 *       as expected was apparently that
+				 *       we used the value that we saved
+				 *       verbatim!
+				 *       It now seems to work fine if we
+				 *       write the 'reserved' bits with zeros!
+				 */
+				WBCR(33, savedMIIAR & 0x3ff);
+
+				if ( d->lcb ) {
+					d->lcb(amdEthLinkStatus(d), d->l_udata);
+				}
 			}
-#endif
 		}
 
 		/* restore address register contents */
@@ -1311,10 +1335,9 @@ AmdEthDev	d;
 			RMWBCR( 2, ~BCR2_DISSCR_SFEX, 0 );
 		}
 
-#ifndef AUTOPOLL_BROKEN
 		/* Enable MII auto polling */
 		RMWBCR( 32, ~0, BCR32_APEP );
-#endif
+
 		/* obtain initial link status */
 		d->stats.linkStat = GET_LINK_STAT();
 
@@ -1683,6 +1706,32 @@ lance_write_bcr(unsigned long val, int offset, AmdEthDev d)
 if ( !d ) d = &devices[0];
 	REGLOCK(d);
 	WriteIndReg(val,offset,&d->baseAddr->rap,&d->baseAddr->bdp);
+	REGUNLOCK(d);
+}
+
+unsigned long
+lance_read_anr(int offset, AmdEthDev d)
+{
+unsigned long rval;
+RAPDECL;
+BDPDECL;
+if ( !d ) d = &devices[0];
+	REGLOCK(d);
+		 WBCR(33, ((0x1e<<5)|offset));
+		 rval = RBCR(34);
+	REGUNLOCK(d);
+	return rval;
+}
+
+void
+lance_write_anr(unsigned long val, int offset, AmdEthDev d)
+{
+RAPDECL;
+BDPDECL;
+if ( !d ) d = &devices[0];
+	REGLOCK(d);
+		 WBCR(33, ((0x1e<<5)|offset));
+		 WBCR(34, val);
 	REGUNLOCK(d);
 }
 
@@ -2081,6 +2130,22 @@ unsigned long linkStat = d->stats.linkStat;
 	}
 	return rval;
 }
+
+int
+amdEthLinkCbRegister(AmdEthDev d, AmdEthLinkCallback callback, void *closure)
+{
+	if ( d->lcb && callback )
+		return AMDETH_ERROR;
+
+	/* don't bother about race condition; this is hardly ever used */
+
+	if ( callback ) {
+		d->l_udata = closure;
+	}
+	d->lcb = callback;
+	return 0;
+}
+
 
 AmdEthDev
 amdEthGetDev(int inst)
