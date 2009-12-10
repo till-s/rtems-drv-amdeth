@@ -2,6 +2,8 @@
 #ifndef TILL_AMD_ETHER_DRIVER_H
 #define TILL_AMD_ETHER_DRIVER_H
 
+#include <stdio.h>
+
 /* use the default device */
 #define AMDETH_DEFAULT_DEVICE	0
 
@@ -285,6 +287,9 @@ amdEthMcFilterAdd(AmdEthDev d, unsigned char *mac_addr);
  */
 void
 amdEthMcFilterDel(AmdEthDev d, unsigned char *mac_addr);
+
+int
+amdEthDumpStats(AmdEthDev d, FILE *f);
 
 #endif
 
