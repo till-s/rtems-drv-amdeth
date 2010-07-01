@@ -1,3 +1,6 @@
+ 20100701 (T.S)
+ * amdeth.c: #include <unistd.h> to silence compiler warning
+   (rtems-4.10 / sleep()).
  20091209 (T.S)
  * amdeth.h: added public declaration of amdEthDumpStats()
  20091017 (T.S)
