@@ -945,7 +945,7 @@ printk("Got something (dstat = 0x%08x)\n",dstat);
 						case AMDETH_FLG_RX_MODE_POLL:
 						break;
 					}
-					d->widx = ++d->widx % d->nRdesc;
+					d->widx = (d->widx + 1) % d->nRdesc;
 				}
 #ifdef DEBUG
 printk("Got last (dstat = 0x%08x)\n",dstat);
@@ -1195,7 +1195,7 @@ printk("ReceivPacket (sync)\n");
 			REGLOCK(d);
 			yieldRx(d, RXDESC_STAT_ONES | (-len & RXDESC_STAT_BCNT_MSK), d->ridx);
 			REGUNLOCK(d);
-			d->ridx = ++d->ridx % d->nRdesc;
+			d->ridx = (d->ridx + 1) % d->nRdesc;
 
 			return rval;
 
