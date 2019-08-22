@@ -5,7 +5,7 @@ include $(top_srcdir)/rtems-pre.am
 
 EXEEXT=$(OBJEXEEXT)
 
-libamdEth_a_SOURCES     = amdeth.c wrap/wrap.h
+libamdEth_a_SOURCES     = amdeth.c wrap.h
 
 include_HEADERS         = amdeth.h
 
